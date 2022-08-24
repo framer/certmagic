@@ -453,13 +453,6 @@ func (cfg *Config) obtainCert(ctx context.Context, name string, interactive bool
 		return nil
 	}
 
-	// ensure storage is writeable and readable
-	// TODO: this is not necessary every time; should only perform check once every so often for each storage, which may require some global state...
-	err := cfg.checkStorage(ctx)
-	if err != nil {
-		return fmt.Errorf("failed storage check: %v - storage is probably misconfigured", err)
-	}
-
 	log := loggerNamed(cfg.Logger, "obtain")
 
 	if log != nil {
@@ -468,7 +461,7 @@ func (cfg *Config) obtainCert(ctx context.Context, name string, interactive bool
 
 	// ensure idempotency of the obtain operation for this name
 	lockKey := cfg.lockKey(certIssueLockOp, name)
-	err = acquireLock(ctx, cfg.Storage, lockKey)
+	err := acquireLock(ctx, cfg.Storage, lockKey)
 	if err != nil {
 		return fmt.Errorf("unable to acquire lock '%s': %v", lockKey, err)
 	}
