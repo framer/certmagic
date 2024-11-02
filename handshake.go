@@ -31,9 +31,9 @@ import (
 )
 
 func (cfg *Config) startTransaction(ctx context.Context, name string) func() {
-	if err := cfg.emit(ctx, "new_relic_start_segment", map[string]any{"name": name}); err == nil {
+	if err := cfg.emit(ctx, "new_relic_start_segment", map[string]any{"name": name, "ctx": ctx}); err == nil {
 		return func() {
-			cfg.emit(ctx, "new_relic_end_segment", map[string]any{})
+			cfg.emit(ctx, "new_relic_end_segment", map[string]any{"ctx": ctx})
 		}
 	}
 	return func() {}
