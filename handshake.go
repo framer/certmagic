@@ -135,7 +135,7 @@ func (cfg *Config) GetCertificateWithContext(ctx context.Context, clientHello *t
 // This function is safe for concurrent use.
 func (cfg *Config) getCertificateFromCache(ctx context.Context, hello *tls.ClientHelloInfo) (cert Certificate, matched, defaulted bool) {
 	name := normalizedName(hello.ServerName)
-	defer cfg.startSegment(ctx, "getCertificateFromCache", segmentAttribute{"name", name})(segmentAttribute{"matched", matched}, segmentAttribute{"defaulted", defaulted})
+	defer cfg.startSegment(ctx, "getCertificateFromCache")(segmentAttribute{"matched", matched}, segmentAttribute{"defaulted", defaulted})
 
 	if name == "" {
 		// if SNI is empty, prefer matching IP address
@@ -208,7 +208,6 @@ func (cfg *Config) getCertificateFromCache(ctx context.Context, hello *tls.Clien
 // for the cfg.CertSelection to make the final decision.
 func (cfg *Config) selectCert(ctx context.Context, hello *tls.ClientHelloInfo, name string) (Certificate, bool) {
 	defer cfg.startSegment(ctx, "selectCert",
-		segmentAttribute{"name", name},
 		segmentAttribute{"has_cert_selection", cfg.CertSelection != nil})()
 	logger := cfg.Logger.Named("handshake")
 
