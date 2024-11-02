@@ -30,13 +30,26 @@ import (
 	"golang.org/x/crypto/ocsp"
 )
 
-func (cfg *Config) startSegment(ctx context.Context, name string) func() {
-	if err := cfg.emit(ctx, "new_relic_start_segment", map[string]any{"name": name, "ctx": ctx}); err == nil {
-		return func() {
-			cfg.emit(ctx, "new_relic_end_segment", map[string]any{"ctx": ctx})
+type segmentAttribute struct {
+	Name  string
+	Value any
+}
+
+func (cfg *Config) startSegment(ctx context.Context, name string, attributes ...segmentAttribute) func(...segmentAttribute) {
+	eventData := map[string]any{"name": name, "ctx": ctx}
+	for _, attr := range attributes {
+		eventData[attr.Name] = attr.Value
+	}
+	if err := cfg.emit(ctx, "new_relic_start_segment", eventData); err == nil {
+		return func(attribute ...segmentAttribute) {
+			eventData := map[string]any{"ctx": ctx}
+			for _, attr := range attributes {
+				eventData[attr.Name] = attr.Value
+			}
+			cfg.emit(ctx, "new_relic_end_segment", eventData)
 		}
 	}
-	return func() {}
+	return func(...segmentAttribute) {}
 }
 
 // GetCertificate gets a certificate to satisfy clientHello. In getting
@@ -120,14 +133,15 @@ func (cfg *Config) GetCertificateWithContext(ctx context.Context, clientHello *t
 // which is by the Go Authors.
 //
 // This function is safe for concurrent use.
-func (cfg *Config) getCertificateFromCache(hello *tls.ClientHelloInfo) (cert Certificate, matched, defaulted bool) {
+func (cfg *Config) getCertificateFromCache(ctx context.Context, hello *tls.ClientHelloInfo) (cert Certificate, matched, defaulted bool) {
 	name := normalizedName(hello.ServerName)
+	defer cfg.startSegment(ctx, "getCertificateFromCache", segmentAttribute{"name", name})(segmentAttribute{"matched", matched}, segmentAttribute{"defaulted", defaulted})
 
 	if name == "" {
 		// if SNI is empty, prefer matching IP address
 		if hello.Conn != nil {
 			addr := localIPFromConn(hello.Conn)
-			cert, matched = cfg.selectCert(hello, addr)
+			cert, matched = cfg.selectCert(ctx, hello, addr)
 			if matched {
 				return
 			}
@@ -136,14 +150,14 @@ func (cfg *Config) getCertificateFromCache(hello *tls.ClientHelloInfo) (cert Cer
 		// use a "default" certificate by name, if specified
 		if cfg.DefaultServerName != "" {
 			normDefault := normalizedName(cfg.DefaultServerName)
-			cert, defaulted = cfg.selectCert(hello, normDefault)
+			cert, defaulted = cfg.selectCert(ctx, hello, normDefault)
 			if defaulted {
 				return
 			}
 		}
 	} else {
 		// if SNI is specified, try an exact match first
-		cert, matched = cfg.selectCert(hello, name)
+		cert, matched = cfg.selectCert(ctx, hello, name)
 		if matched {
 			return
 		}
@@ -154,7 +168,7 @@ func (cfg *Config) getCertificateFromCache(hello *tls.ClientHelloInfo) (cert Cer
 		for i := range labels {
 			labels[i] = "*"
 			candidate := strings.Join(labels, ".")
-			cert, matched = cfg.selectCert(hello, candidate)
+			cert, matched = cfg.selectCert(ctx, hello, candidate)
 			if matched {
 				return
 			}
@@ -169,7 +183,7 @@ func (cfg *Config) getCertificateFromCache(hello *tls.ClientHelloInfo) (cert Cer
 	// the backend origin's true hostname in a cert).
 	if cfg.FallbackServerName != "" {
 		normFallback := normalizedName(cfg.FallbackServerName)
-		cert, defaulted = cfg.selectCert(hello, normFallback)
+		cert, defaulted = cfg.selectCert(ctx, hello, normFallback)
 		if defaulted {
 			return
 		}
@@ -192,9 +206,15 @@ func (cfg *Config) getCertificateFromCache(hello *tls.ClientHelloInfo) (cert Cer
 // certificates match name and cfg.CertSelection is set,
 // then all certificates in the cache will be passed in
 // for the cfg.CertSelection to make the final decision.
-func (cfg *Config) selectCert(hello *tls.ClientHelloInfo, name string) (Certificate, bool) {
+func (cfg *Config) selectCert(ctx context.Context, hello *tls.ClientHelloInfo, name string) (Certificate, bool) {
+	defer cfg.startSegment(ctx, "selectCert",
+		segmentAttribute{"name", name},
+		segmentAttribute{"has_cert_selection", cfg.CertSelection != nil})()
 	logger := cfg.Logger.Named("handshake")
+
+	endGetAllMatchingCerts := cfg.startSegment(ctx, "selectCert/getAllMatchingCerts")
 	choices := cfg.certCache.getAllMatchingCerts(name)
+	endGetAllMatchingCerts(segmentAttribute{"num_matching_certs", len(choices)})
 
 	if len(choices) == 0 {
 		if cfg.CertSelection == nil {
@@ -205,6 +225,7 @@ func (cfg *Config) selectCert(hello *tls.ClientHelloInfo, name string) (Certific
 		choices = cfg.certCache.getAllCerts()
 	}
 
+	defer cfg.startSegment(ctx, "selectCert/choose")()
 	logger.Debug("choosing certificate",
 		zap.String("identifier", name),
 		zap.Int("num_choices", len(choices)))
@@ -278,7 +299,7 @@ func (cfg *Config) getCertDuringHandshake(ctx context.Context, hello *tls.Client
 
 	// First check our in-memory cache to see if we've already loaded it
 	endGetCertificateFromCache := cfg.startSegment(ctx, "GetCertificateFromCache")
-	cert, matched, defaulted := cfg.getCertificateFromCache(hello)
+	cert, matched, defaulted := cfg.getCertificateFromCache(ctx, hello)
 	if matched {
 		defer endGetCertificateFromCache()
 		logger.Debug("matched certificate in cache",
@@ -295,7 +316,7 @@ func (cfg *Config) getCertDuringHandshake(ctx context.Context, hello *tls.Client
 		return cert, nil
 	}
 	endGetCertificateFromCache()
-	defer cfg.startSegment(ctx, "getCertificateFromCache/notCached")()
+	endNotCached := cfg.startSegment(ctx, "getCertificateDuringHandshake/notCached")
 
 	name := cfg.getNameFromClientHello(hello)
 
@@ -305,6 +326,8 @@ func (cfg *Config) getCertDuringHandshake(ctx context.Context, hello *tls.Client
 	certLoadWaitChansMu.Lock()
 	wait, ok := certLoadWaitChans[name]
 	if ok {
+		defer endNotCached(segmentAttribute{"path", "waiting"})
+
 		// another goroutine is already loading the cert; just wait and we'll get it from the in-memory cache
 		certLoadWaitChansMu.Unlock()
 
@@ -321,6 +344,8 @@ func (cfg *Config) getCertDuringHandshake(ctx context.Context, hello *tls.Client
 
 		return cfg.getCertDuringHandshake(ctx, hello, false)
 	} else {
+		defer endNotCached(segmentAttribute{"path", "acquiring"})
+
 		// no other goroutine is currently trying to load this cert
 		wait = make(chan struct{})
 		certLoadWaitChans[name] = wait
@@ -335,6 +360,7 @@ func (cfg *Config) getCertDuringHandshake(ctx context.Context, hello *tls.Client
 		}()
 	}
 
+	endAcquireSkip := cfg.startSegment(ctx, "getCertificateDuringHandshake/acquire/maybeSkip")
 	// If an external Manager is configured, try to get it from them.
 	// Only continue to use our own logic if it returns empty+nil.
 	externalCert, err := cfg.getCertFromAnyCertManager(ctx, hello, logger)
@@ -350,6 +376,9 @@ func (cfg *Config) getCertDuringHandshake(ctx context.Context, hello *tls.Client
 	if err := cfg.checkIfCertShouldBeObtained(ctx, name, false); err != nil {
 		return Certificate{}, fmt.Errorf("certificate is not allowed for server name %s: %w", name, err)
 	}
+	endAcquireSkip()
+
+	endAcquireSettings := cfg.startSegment(ctx, "getCertificateDuringHandshake/acquire/settings")
 
 	// We might be able to load or obtain a needed certificate. Load from
 	// storage if OnDemand is enabled, or if there is the possibility that
@@ -371,7 +400,18 @@ func (cfg *Config) getCertDuringHandshake(ctx context.Context, hello *tls.Client
 	cacheAlmostFull := cacheCapacity > 0 && float64(cacheSize) >= cacheCapacity*.9
 	loadDynamically := cfg.OnDemand != nil || cacheAlmostFull
 
+	endAcquireSettings(
+		segmentAttribute{"load_dynamically", loadDynamically},
+		segmentAttribute{"load_or_obtain_if_necessary", loadOrObtainIfNecessary},
+		segmentAttribute{"on_demand", cfg.OnDemand != nil},
+		segmentAttribute{"cache_almost_full", cacheAlmostFull},
+		segmentAttribute{"cache_capacity", cacheCapacity},
+		segmentAttribute{"cache_size", cacheSize},
+	)
+
 	if loadDynamically && loadOrObtainIfNecessary {
+		defer cfg.startSegment(ctx, "getCertificateDuringHandshake/acquire/load")()
+
 		// Check to see if we have one on disk
 		loadedCert, err := cfg.loadCertFromStorage(ctx, logger, hello)
 		if err == nil {
@@ -386,6 +426,8 @@ func (cfg *Config) getCertDuringHandshake(ctx context.Context, hello *tls.Client
 		}
 		return loadedCert, nil
 	}
+
+	defer cfg.startSegment(ctx, "getCertificateDuringHandshake/acquire/logFailed")()
 
 	// Fall back to another certificate if there is one (either DefaultServerName or FallbackServerName)
 	if defaulted {
@@ -412,6 +454,7 @@ func (cfg *Config) getCertDuringHandshake(ctx context.Context, hello *tls.Client
 // loadCertFromStorage loads the certificate for name from storage and maintains it
 // (as this is only called with on-demand TLS enabled).
 func (cfg *Config) loadCertFromStorage(ctx context.Context, logger *zap.Logger, hello *tls.ClientHelloInfo) (Certificate, error) {
+	defer cfg.startSegment(ctx, "loadCertFromStorage")()
 	name := cfg.getNameFromClientHello(hello)
 	loadedCert, err := cfg.CacheManagedCertificate(ctx, name)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -565,6 +608,7 @@ func (cfg *Config) obtainOnDemandCertificate(ctx context.Context, hello *tls.Cli
 //
 // This function is safe for use by multiple concurrent goroutines.
 func (cfg *Config) handshakeMaintenance(ctx context.Context, hello *tls.ClientHelloInfo, cert Certificate) (Certificate, error) {
+	defer cfg.startSegment(ctx, "handshakeMaintenance")()
 	logger := cfg.Logger.Named("on_demand")
 
 	// Check OCSP staple validity
