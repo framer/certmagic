@@ -224,7 +224,7 @@ func (cfg *Config) selectCert(ctx context.Context, hello *tls.ClientHelloInfo, n
 		choices = cfg.certCache.getAllCerts()
 	}
 
-	defer cfg.startSegment(ctx, "selectCert/choose")()
+	defer cfg.startSegment(ctx, "selectCert/choose", segmentAttribute{"num_matching_certs", len(choices)})()
 	logger.Debug("choosing certificate",
 		zap.String("identifier", name),
 		zap.Int("num_choices", len(choices)))
@@ -242,7 +242,6 @@ func (cfg *Config) selectCert(ctx context.Context, hello *tls.ClientHelloInfo, n
 	}
 
 	cert, err := cfg.CertSelection.SelectCertificate(hello, choices)
-
 	logger.Debug("custom certificate selection results",
 		zap.Error(err),
 		zap.String("identifier", name),
