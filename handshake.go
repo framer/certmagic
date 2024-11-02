@@ -30,7 +30,7 @@ import (
 	"golang.org/x/crypto/ocsp"
 )
 
-func (cfg *Config) startTransaction(ctx context.Context, name string) func() {
+func (cfg *Config) startSegment(ctx context.Context, name string) func() {
 	if err := cfg.emit(ctx, "new_relic_start_segment", map[string]any{"name": name, "ctx": ctx}); err == nil {
 		return func() {
 			cfg.emit(ctx, "new_relic_end_segment", map[string]any{"ctx": ctx})
@@ -66,7 +66,7 @@ func (cfg *Config) GetCertificateWithContext(ctx context.Context, clientHello *t
 			zap.Error(err))
 		return nil, fmt.Errorf("handshake aborted by event handler: %w", err)
 	}
-	defer cfg.startTransaction(ctx, "GetCertificateWithContext")()
+	defer cfg.startSegment(ctx, "GetCertificateWithContext")()
 
 	if ctx == nil {
 		// tests can't set context on a tls.ClientHelloInfo because it's unexported :(
@@ -272,12 +272,12 @@ func DefaultCertificateSelector(hello *tls.ClientHelloInfo, choices []Certificat
 //
 // This function is safe for concurrent use.
 func (cfg *Config) getCertDuringHandshake(ctx context.Context, hello *tls.ClientHelloInfo, loadOrObtainIfNecessary bool) (Certificate, error) {
-	defer cfg.startTransaction(ctx, "getCertificateDuringHandshake")()
+	defer cfg.startSegment(ctx, "getCertificateDuringHandshake")()
 
 	logger := logWithRemote(cfg.Logger.Named("handshake"), hello)
 
 	// First check our in-memory cache to see if we've already loaded it
-	endGetCertificateFromCache := cfg.startTransaction(ctx, "GetCertificateFromCache")
+	endGetCertificateFromCache := cfg.startSegment(ctx, "GetCertificateFromCache")
 	cert, matched, defaulted := cfg.getCertificateFromCache(hello)
 	if matched {
 		defer endGetCertificateFromCache()
@@ -295,7 +295,7 @@ func (cfg *Config) getCertDuringHandshake(ctx context.Context, hello *tls.Client
 		return cert, nil
 	}
 	endGetCertificateFromCache()
-	defer cfg.startTransaction(ctx, "getCertificateFromCache/notCached")()
+	defer cfg.startSegment(ctx, "getCertificateFromCache/notCached")()
 
 	name := cfg.getNameFromClientHello(hello)
 
