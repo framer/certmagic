@@ -60,6 +60,7 @@ func (cfg *Config) GetCertificateWithContext(ctx context.Context, clientHello *t
 	}
 
 	if ctx == nil {
+		cfg.Logger.Debug("ctx is nil in GetCertificateWithContext - setting to background: this is going to be a long-running renewal")
 		// tests can't set context on a tls.ClientHelloInfo because it's unexported :(
 		ctx = context.Background()
 	}
