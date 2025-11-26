@@ -167,7 +167,19 @@ func (cfg *Config) saveCertResource(ctx context.Context, issuer Issuer, cert Cer
 		},
 	}
 
-	return storeTx(ctx, cfg.Storage, all)
+	if err := storeTx(ctx, cfg.Storage, all); err != nil {
+		return err
+	}
+
+	// Also store the certificate resource as a single entity.
+	// This duplication is needed during the transition phase.
+	// TODO: Remove the storeTx call after all certificates have been migrated.
+	if crs, ok := cfg.Storage.(CertificateResourceStorage); ok {
+		key := StorageKeys.CertificateResource(issuer.IssuerKey(), cert.NamesKey())
+		return crs.StoreCertificateResource(ctx, key, cert)
+	}
+
+	return nil
 }
 
 // loadCertResourceAnyIssuer loads and returns the certificate resource from any
@@ -244,6 +256,17 @@ func (cfg *Config) loadCertResource(ctx context.Context, issuer Issuer, certName
 	normalizedName, err := idna.ToASCII(certNamesKey)
 	if err != nil {
 		return CertificateResource{}, fmt.Errorf("converting '%s' to ASCII: %v", certNamesKey, err)
+	}
+
+	// Try to load the certificate resource as a single entity.
+	// This duplication is needed during the transition phase.
+	// TODO: Remove the individual loads all certificates have been migrated.
+	if crs, ok := cfg.Storage.(CertificateResourceStorage); ok {
+		key := StorageKeys.CertificateResource(certRes.issuerKey, normalizedName)
+		if res, err := crs.LoadCertificateResource(ctx, key); err == nil {
+			return res, nil
+		}
+		// Fallthrough to load the certificate resource from individual keys.
 	}
 
 	keyBytes, err := cfg.Storage.Load(ctx, StorageKeys.SitePrivateKey(certRes.issuerKey, normalizedName))

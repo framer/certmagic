@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"os"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -78,6 +79,68 @@ func TestSaveCertResource(t *testing.T) {
 	}
 }
 
+func TestSaveCertResourceWithCertificateResourceStorage(t *testing.T) {
+	ctx := context.Background()
+
+	am := &ACMEIssuer{CA: "https://example.com/acme/directory"}
+	mockStore := &mockCertificateResourceStorage{
+		Storage: &FileStorage{Path: "./_testdata_tmp"},
+	}
+
+	testConfig := &Config{
+		Storage:   mockStore,
+		Issuers:   []Issuer{am},
+		Logger:    defaultTestLogger,
+		certCache: new(Cache),
+	}
+	am.config = testConfig
+
+	domain := "example.com"
+	certContents := "certificate"
+	keyContents := "private key"
+
+	cert := CertificateResource{
+		SANs:           []string{domain},
+		PrivateKeyPEM:  []byte(keyContents),
+		CertificatePEM: []byte(certContents),
+		IssuerData: mustJSON(acme.Certificate{
+			URL: "https://example.com/cert",
+		}),
+		issuerKey: am.IssuerKey(),
+	}
+
+	err := testConfig.saveCertResource(ctx, am, cert)
+	if err != nil {
+		t.Fatalf("Expected no error, got: %v", err)
+	}
+
+	siteData, err := testConfig.loadCertResource(ctx, am, domain)
+	if err != nil {
+		t.Fatalf("Expected no error reading site, got: %v", err)
+	}
+
+	if !slices.Equal(cert.SANs, siteData.SANs) {
+		t.Fatalf("Expected SANs to be equal, want: %v, got: %v", cert.SANs, siteData.SANs)
+	}
+	if !bytes.Equal(cert.PrivateKeyPEM, siteData.PrivateKeyPEM) {
+		t.Fatalf("Expected PrivateKeyPEM to be equal, want: %v, got: %v", cert.SANs, siteData.SANs)
+	}
+	if !bytes.Equal(cert.CertificatePEM, siteData.CertificatePEM) {
+		t.Fatalf("Expected CertificatePEM to be equal, want: %v, got: %v", cert.SANs, siteData.SANs)
+	}
+	if !bytes.Equal(cert.IssuerData, siteData.IssuerData) {
+		t.Fatalf("Expected IssuerData to be equal, want: %v, got: %v", cert.SANs, siteData.SANs)
+	}
+
+	// Asserting internals is not ideal, but somehow we have to ensure interface promotion works correctly.
+	if mockStore.StoreCertificateResourceCalls != 1 {
+		t.Fatalf("Expected StoreCertificateResource to be called")
+	}
+	if mockStore.LoadCertificateResourceCalls != 1 {
+		t.Fatalf("Expected LoadCertificateResource to be called")
+	}
+}
+
 type mockStorageWithLease struct {
 	*FileStorage
 	renewCalled  bool
@@ -91,6 +154,67 @@ func (m *mockStorageWithLease) RenewLockLease(ctx context.Context, lockKey strin
 	m.lastLockKey = lockKey
 	m.lastDuration = leaseDuration
 	return m.renewError
+}
+
+type mockCertificateResourceStorage struct {
+	Storage
+
+	StoreCertificateResourceCalls int
+	LoadCertificateResourceCalls  int
+}
+
+func (s *mockCertificateResourceStorage) StoreCertificateResource(ctx context.Context, key string, res CertificateResource) error {
+	s.StoreCertificateResourceCalls++
+
+	// Some attributes in CertificateResource have the `json:"-"` tag,
+	// which is why we have to create a new struct for encoding.
+	resource := struct {
+		SANs           []string
+		CertificatePEM []byte
+		PrivateKeyPEM  []byte
+		IssuerData     json.RawMessage
+	}{
+		SANs:           res.SANs,
+		CertificatePEM: res.CertificatePEM,
+		PrivateKeyPEM:  res.PrivateKeyPEM,
+		IssuerData:     res.IssuerData,
+	}
+
+	buf, err := json.Marshal(resource)
+	if err != nil {
+		return err
+	}
+
+	return s.Storage.Store(ctx, key, buf)
+}
+
+func (s *mockCertificateResourceStorage) LoadCertificateResource(ctx context.Context, key string) (CertificateResource, error) {
+	s.LoadCertificateResourceCalls++
+
+	buf, err := s.Storage.Load(ctx, key)
+	if err != nil {
+		return CertificateResource{}, err
+	}
+
+	var resource struct {
+		SANs           []string
+		CertificatePEM []byte
+		PrivateKeyPEM  []byte
+		IssuerData     json.RawMessage
+	}
+
+	if err := json.Unmarshal(buf, &resource); err != nil {
+		return CertificateResource{}, err
+	}
+
+	res := CertificateResource{
+		SANs:           resource.SANs,
+		CertificatePEM: resource.CertificatePEM,
+		PrivateKeyPEM:  resource.PrivateKeyPEM,
+		IssuerData:     resource.IssuerData,
+	}
+
+	return res, nil
 }
 
 func TestRenewLockLeaseDuration(t *testing.T) {

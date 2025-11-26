@@ -104,6 +104,18 @@ type Storage interface {
 	Stat(ctx context.Context, key string) (KeyInfo, error)
 }
 
+// CertificateResourceStorage adds helpers for storing and loading
+// CertificateResource values. Implementations should serialize the
+// resource to a consistent format.
+type CertificateResourceStorage interface {
+	// StoreCertificateResource stores the certificate resource at key,
+	// overwriting any existing value.
+	StoreCertificateResource(ctx context.Context, key string, res CertificateResource) error
+
+	// LoadCertificateResource loads the certificate resource at key.
+	LoadCertificateResource(ctx context.Context, key string) (CertificateResource, error)
+}
+
 // Locker facilitates synchronization across machines and networks.
 // It essentially provides a distributed named-mutex service so
 // that multiple consumers can coordinate tasks and share resources.
@@ -250,6 +262,14 @@ func (keys KeyBuilder) SiteMeta(issuerKey, domain string) string {
 	return path.Join(keys.CertsSitePrefix(issuerKey, domain), safeDomain+".json")
 }
 
+// CertificateResource returns the path to the resource file for domain that
+// is associated with the certificate from the given issuer with
+// the given issuerKey.
+func (keys KeyBuilder) CertificateResource(issuerKey, domain string) string {
+	safeDomain := keys.Safe(domain)
+	return path.Join(keys.CertsSitePrefix(issuerKey, domain), safeDomain+".res")
+}
+
 // OCSPStaple returns a key for the OCSP staple associated
 // with the given certificate. If you have the PEM bundle
 // handy, pass that in to save an extra encoding step.
@@ -342,8 +362,10 @@ func releaseLock(ctx context.Context, storage Storage, lockKey string) error {
 
 // locks stores a reference to all the current
 // locks obtained by this process.
-var locks = make(map[string]Storage)
-var locksMu sync.Mutex
+var (
+	locks   = make(map[string]Storage)
+	locksMu sync.Mutex
+)
 
 // StorageKeys provides methods for accessing
 // keys and key prefixes for items in a Storage.
