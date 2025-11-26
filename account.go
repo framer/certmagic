@@ -73,14 +73,18 @@ func (am *ACMEIssuer) loadOrCreateAccount(ctx context.Context, ca, email string)
 
 // loadAccount loads an account from storage, but does not create a new one.
 func (am *ACMEIssuer) loadAccount(ctx context.Context, ca, email string) (acme.Account, error) {
-	regBytes, err := am.config.Storage.Load(ctx, am.storageKeyUserReg(ca, email))
+	keys := []string{
+		am.storageKeyUserReg(ca, email),
+		am.storageKeyUserPrivateKey(ca, email),
+	}
+
+	vals, err := loadTx(ctx, am.config.Storage, keys)
 	if err != nil {
 		return acme.Account{}, err
 	}
-	keyBytes, err := am.config.Storage.Load(ctx, am.storageKeyUserPrivateKey(ca, email))
-	if err != nil {
-		return acme.Account{}, err
-	}
+
+	regBytes := vals[0]
+	keyBytes := vals[1]
 
 	var acct acme.Account
 	err = json.Unmarshal(regBytes, &acct)
@@ -196,7 +200,7 @@ func (am *ACMEIssuer) saveAccount(ctx context.Context, ca string, account acme.A
 	}
 	// extract primary contact (email), without scheme (e.g. "mailto:")
 	primaryContact := getPrimaryContact(account)
-	all := []keyValue{
+	all := []KeyValue{
 		{
 			key:   am.storageKeyUserReg(ca, primaryContact),
 			value: regBytes,

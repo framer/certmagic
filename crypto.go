@@ -152,7 +152,7 @@ func (cfg *Config) saveCertResource(ctx context.Context, issuer Issuer, cert Cer
 	issuerKey := issuer.IssuerKey()
 	certKey := cert.NamesKey()
 
-	all := []keyValue{
+	all := []KeyValue{
 		{
 			key:   StorageKeys.SitePrivateKey(issuerKey, certKey),
 			value: cert.PrivateKeyPEM,
@@ -246,20 +246,24 @@ func (cfg *Config) loadCertResource(ctx context.Context, issuer Issuer, certName
 		return CertificateResource{}, fmt.Errorf("converting '%s' to ASCII: %v", certNamesKey, err)
 	}
 
-	keyBytes, err := cfg.Storage.Load(ctx, StorageKeys.SitePrivateKey(certRes.issuerKey, normalizedName))
+	keys := []string{
+		StorageKeys.SitePrivateKey(certRes.issuerKey, normalizedName),
+		StorageKeys.SiteCert(certRes.issuerKey, normalizedName),
+		StorageKeys.SiteMeta(certRes.issuerKey, normalizedName),
+	}
+
+	vals, err := loadTx(ctx, cfg.Storage, keys)
 	if err != nil {
 		return CertificateResource{}, err
 	}
+
+	keyBytes := vals[0]
+	certBytes := vals[1]
+	metaBytes := vals[2]
+
 	certRes.PrivateKeyPEM = keyBytes
-	certBytes, err := cfg.Storage.Load(ctx, StorageKeys.SiteCert(certRes.issuerKey, normalizedName))
-	if err != nil {
-		return CertificateResource{}, err
-	}
 	certRes.CertificatePEM = certBytes
-	metaBytes, err := cfg.Storage.Load(ctx, StorageKeys.SiteMeta(certRes.issuerKey, normalizedName))
-	if err != nil {
-		return CertificateResource{}, err
-	}
+
 	err = json.Unmarshal(metaBytes, &certRes)
 	if err != nil {
 		return CertificateResource{}, fmt.Errorf("decoding certificate metadata: %v", err)

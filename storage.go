@@ -16,6 +16,7 @@ package certmagic
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path"
 	"regexp"
@@ -102,6 +103,21 @@ type Storage interface {
 
 	// Stat returns information about key.
 	Stat(ctx context.Context, key string) (KeyInfo, error)
+}
+
+// BulkStorage is an optional interface for backends that support
+// performing operations on multiple keys in a single call. This is
+// useful for reducing round-trips or using backend-native batch
+// primitives. Implementations must be safe for concurrent use and
+// honor context cancellations.
+type BulkStorage interface {
+	// StoreAll stores all key/value pairs. If possible, this should be
+	// done atomically so that either all keys are written or none are.
+	StoreAll(ctx context.Context, all []KeyValue) error
+
+	// LoadAll returns the values for the given keys, preserving the order:
+	// each returned value corresponds to the key at the same index.
+	LoadAll(ctx context.Context, keys []string) ([][]byte, error)
 }
 
 // Locker facilitates synchronization across machines and networks.
@@ -191,7 +207,13 @@ type KeyInfo struct {
 }
 
 // storeTx stores all the values or none at all.
-func storeTx(ctx context.Context, s Storage, all []keyValue) error {
+func storeTx(ctx context.Context, s Storage, all []KeyValue) error {
+	// Try promoting Storage to a BulkStorage and write all pairs at once.
+	// BulkStorage assumes operations are atomic and thus removes the need for deletes on error.
+	if bs, ok := s.(BulkStorage); ok {
+		return bs.StoreAll(ctx, all)
+	}
+
 	for i, kv := range all {
 		err := s.Store(ctx, kv.key, kv.value)
 		if err != nil {
@@ -204,8 +226,33 @@ func storeTx(ctx context.Context, s Storage, all []keyValue) error {
 	return nil
 }
 
-// keyValue pairs a key and a value.
-type keyValue struct {
+// loadTx loads all the values or none at all.
+func loadTx(ctx context.Context, s Storage, keys []string) ([][]byte, error) {
+	// Try promoting Storage to a BulkStorage and load all pairs at once.
+	if bs, ok := s.(BulkStorage); ok {
+		vals, err := bs.LoadAll(ctx, keys)
+		if err != nil {
+			return nil, err
+		}
+		if len(keys) != len(vals) {
+			return nil, errors.New("mismatching number of keys and values")
+		}
+		return vals, nil
+	}
+
+	vals := make([][]byte, len(keys))
+	for i, key := range keys {
+		val, err := s.Load(ctx, key)
+		if err != nil {
+			return nil, err
+		}
+		vals[i] = val
+	}
+	return vals, nil
+}
+
+// KeyValue pairs a key and a value.
+type KeyValue struct {
 	key   string
 	value []byte
 }
