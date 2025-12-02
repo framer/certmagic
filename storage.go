@@ -104,18 +104,6 @@ type Storage interface {
 	Stat(ctx context.Context, key string) (KeyInfo, error)
 }
 
-// CertificateResourceStorage adds helpers for storing and loading
-// CertificateResource values. Implementations should serialize the
-// resource to a consistent format.
-type CertificateResourceStorage interface {
-	// StoreCertificateResource stores the certificate resource at key,
-	// overwriting any existing value.
-	StoreCertificateResource(ctx context.Context, key string, res CertificateResource) error
-
-	// LoadCertificateResource loads the certificate resource at key.
-	LoadCertificateResource(ctx context.Context, key string) (CertificateResource, error)
-}
-
 // Locker facilitates synchronization across machines and networks.
 // It essentially provides a distributed named-mutex service so
 // that multiple consumers can coordinate tasks and share resources.

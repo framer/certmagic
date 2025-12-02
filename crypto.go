@@ -144,42 +144,16 @@ func fastHash(input []byte) string {
 // includes the certificate file itself, the private key, and the
 // metadata file.
 func (cfg *Config) saveCertResource(ctx context.Context, issuer Issuer, cert CertificateResource) error {
-	metaBytes, err := json.MarshalIndent(cert, "", "\t")
+	encoded, err := encodeCertResource(cert)
 	if err != nil {
-		return fmt.Errorf("encoding certificate metadata: %v", err)
+		return fmt.Errorf("encoding certificate resource: %v", err)
 	}
 
 	issuerKey := issuer.IssuerKey()
 	certKey := cert.NamesKey()
 
-	all := []keyValue{
-		{
-			key:   StorageKeys.SitePrivateKey(issuerKey, certKey),
-			value: cert.PrivateKeyPEM,
-		},
-		{
-			key:   StorageKeys.SiteCert(issuerKey, certKey),
-			value: cert.CertificatePEM,
-		},
-		{
-			key:   StorageKeys.SiteMeta(issuerKey, certKey),
-			value: metaBytes,
-		},
-	}
-
-	if err := storeTx(ctx, cfg.Storage, all); err != nil {
-		return err
-	}
-
-	// Also store the certificate resource as a single entity.
-	// This duplication is needed during the transition phase.
-	// TODO: Remove the storeTx call after all certificates have been migrated.
-	if crs, ok := cfg.Storage.(CertificateResourceStorage); ok {
-		key := StorageKeys.CertificateResource(issuer.IssuerKey(), cert.NamesKey())
-		return crs.StoreCertificateResource(ctx, key, cert)
-	}
-
-	return nil
+	key := StorageKeys.CertificateResource(issuerKey, certKey)
+	return cfg.Storage.Store(ctx, key, encoded)
 }
 
 // loadCertResourceAnyIssuer loads and returns the certificate resource from any
@@ -261,12 +235,15 @@ func (cfg *Config) loadCertResource(ctx context.Context, issuer Issuer, certName
 	// Try to load the certificate resource as a single entity.
 	// This duplication is needed during the transition phase.
 	// TODO: Remove the individual loads all certificates have been migrated.
-	if crs, ok := cfg.Storage.(CertificateResourceStorage); ok {
-		key := StorageKeys.CertificateResource(certRes.issuerKey, normalizedName)
-		if res, err := crs.LoadCertificateResource(ctx, key); err == nil {
-			return res, nil
+	certResourceKey := StorageKeys.CertificateResource(issuer.IssuerKey(), normalizedName)
+	certResourceEncoded, err := cfg.Storage.Load(ctx, certResourceKey)
+	if err == nil {
+		cert, err := decodeCertResource(certResourceEncoded)
+		if err == nil {
+			cert.issuerKey = issuer.IssuerKey()
+			return cert, nil
 		}
-		// Fallthrough to load the certificate resource from individual keys.
+		// Fall through to load cert from individual keys.
 	}
 
 	keyBytes, err := cfg.Storage.Load(ctx, StorageKeys.SitePrivateKey(certRes.issuerKey, normalizedName))
@@ -289,6 +266,60 @@ func (cfg *Config) loadCertResource(ctx context.Context, issuer Issuer, certName
 	}
 
 	return certRes, nil
+}
+
+// StoredCertificateResource associates a certificate with its private
+// key and other useful information, for use in maintaining the
+// certificate.
+type StoredCertificateResource struct {
+	// The list of names on the certificate;
+	// for convenience only.
+	SANs []string `json:"sans,omitempty"`
+
+	// The PEM-encoding of DER-encoded ASN.1 data
+	// for the cert or chain.
+	CertificatePEM []byte `json:"certificate_pem,omitempty"`
+
+	// The PEM-encoding of the certificate's private key.
+	PrivateKeyPEM []byte `json:"private_key_pem,omitempty"`
+
+	// Any extra information associated with the certificate,
+	// usually provided by the issuer implementation.
+	IssuerData json.RawMessage `json:"issuer_data,omitempty"`
+}
+
+type storedCertificate struct {
+	SANs           []string        `json:"sans,omitempty"`
+	CertificatePEM []byte          `json:"certificate_pem,omitempty"`
+	PrivateKeyPEM  []byte          `json:"private_key_pem,omitempty"`
+	IssuerData     json.RawMessage `json:"issuer_data,omitempty"`
+}
+
+func encodeCertResource(cert CertificateResource) ([]byte, error) {
+	storedCert := storedCertificate{
+		SANs:           cert.SANs,
+		CertificatePEM: cert.CertificatePEM,
+		PrivateKeyPEM:  cert.PrivateKeyPEM,
+		IssuerData:     cert.IssuerData,
+	}
+	encoded, err := json.Marshal(storedCert)
+	if err != nil {
+		return nil, err
+	}
+	return encoded, nil
+}
+
+func decodeCertResource(b []byte) (CertificateResource, error) {
+	var storedCert storedCertificate
+	if err := json.Unmarshal(b, &storedCert); err != nil {
+		return CertificateResource{}, err
+	}
+	return CertificateResource{
+		SANs:           storedCert.SANs,
+		CertificatePEM: storedCert.CertificatePEM,
+		PrivateKeyPEM:  storedCert.PrivateKeyPEM,
+		IssuerData:     storedCert.IssuerData,
+	}, nil
 }
 
 // hashCertificateChain computes the unique hash of certChain,
