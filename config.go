@@ -704,7 +704,7 @@ func (cfg *Config) obtainCert(ctx context.Context, name string, interactive bool
 		}
 		err = cfg.saveCertResource(ctx, issuerUsed, certRes)
 		if err != nil {
-			return fmt.Errorf("[%s] Obtain: saving assets: %v", name, err)
+			return fmt.Errorf("[%s] Renew: saving assets: %v", name, err)
 		}
 
 		log.Info("certificate obtained successfully",

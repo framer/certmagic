@@ -30,9 +30,11 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io/fs"
+	"os"
 	"sort"
 	"strings"
 
+	"github.com/caarlos0/log"
 	"github.com/klauspost/cpuid/v2"
 	"github.com/zeebo/blake3"
 	"go.uber.org/zap"
@@ -140,10 +142,73 @@ func fastHash(input []byte) string {
 	return fmt.Sprintf("%x", h.Sum32())
 }
 
-// saveCertResource saves the certificate resource to disk. This
+const (
+	StorageModeEnv = "CERTMAGIC_STORAGE_MODE"
+
+	StorageModeLegacy     = "legacy"
+	StorageModeTransition = "transition"
+	StorageModeBundle     = "bundle"
+)
+
+// saveCertResource saves the certificate resource to disk.
+// It switches storage modes between legacy and bundle mode based on the CERTMAGIC_STORAGE_MODE env.
+func (cfg *Config) saveCertResource(ctx context.Context, issuer Issuer, cert CertificateResource) error {
+	switch os.Getenv(StorageModeEnv) {
+	case StorageModeTransition:
+		// In transition storage mode, certificate resources will be stored as a bundle
+		// in addition to the legacy storage mechanism.
+		// Errors that occured while storing the bundle will only be logged as warning.
+		// The legacy storage mechanism still determines the final success or failure.
+		if err := cfg.saveCertResourceBundle(ctx, issuer, cert); err != nil {
+			log.Warn("unable to store certificate resource bundle",
+				zap.String("issuer", issuer.IssuerKey()),
+				zap.String("domain", cert.NamesKey()),
+				zap.Error(err))
+		}
+		return cfg.saveCertResourceLegacy(ctx, issuer, cert)
+	case StorageModeBundle:
+		// In bundle storage mode, certifiate resources will be stored as a single ".bundle" entity.
+		return cfg.saveCertResourceBundle(ctx, issuer, cert)
+	default:
+		// In legacy storage mode, certifiate resources will be stored unmodified
+		// in their seperate ".key", ".cert", ".json" entities.
+		return cfg.saveCertResourceLegacy(ctx, issuer, cert)
+	}
+}
+
+// saveCertResourceLegacy saves the certificate resource to disk. This
 // includes the certificate file itself, the private key, and the
 // metadata file.
-func (cfg *Config) saveCertResource(ctx context.Context, issuer Issuer, cert CertificateResource) error {
+func (cfg *Config) saveCertResourceLegacy(ctx context.Context, issuer Issuer, cert CertificateResource) error {
+	metaBytes, err := json.MarshalIndent(cert, "", "\t")
+	if err != nil {
+		return fmt.Errorf("encoding certificate metadata: %v", err)
+	}
+
+	issuerKey := issuer.IssuerKey()
+	certKey := cert.NamesKey()
+
+	all := []keyValue{
+		{
+			key:   StorageKeys.SitePrivateKey(issuerKey, certKey),
+			value: cert.PrivateKeyPEM,
+		},
+		{
+			key:   StorageKeys.SiteCert(issuerKey, certKey),
+			value: cert.CertificatePEM,
+		},
+		{
+			key:   StorageKeys.SiteMeta(issuerKey, certKey),
+			value: metaBytes,
+		},
+	}
+
+	return storeTx(ctx, cfg.Storage, all)
+}
+
+// saveCertResourceBundle saves the certificate resource as a bundle to disk. This
+// includes the certificate, the private key, and the metadata.
+func (cfg *Config) saveCertResourceBundle(ctx context.Context, issuer Issuer, cert CertificateResource) error {
 	encoded, err := encodeCertResource(cert)
 	if err != nil {
 		return fmt.Errorf("encoding certificate resource: %v", err)
@@ -222,28 +287,31 @@ func (cfg *Config) loadCertResourceAnyIssuer(ctx context.Context, certNamesKey s
 	return certResources[0].CertificateResource, nil
 }
 
-// loadCertResource loads a certificate resource from the given issuer's storage location.
 func (cfg *Config) loadCertResource(ctx context.Context, issuer Issuer, certNamesKey string) (CertificateResource, error) {
+	switch os.Getenv(StorageModeEnv) {
+	case StorageModeBundle:
+		return cfg.loadCertResourceBundle(ctx, issuer, certNamesKey)
+	case StorageModeTransition:
+		// Try loading the certificate from the bundle first.
+		// Fallback to legacy storage on failure.
+		certRes, err := cfg.loadCertResourceBundle(ctx, issuer, certNamesKey)
+		if err == nil {
+			return certRes, nil
+		}
+		return cfg.loadCertResourceLegacy(ctx, issuer, certNamesKey)
+	default:
+		return cfg.loadCertResourceLegacy(ctx, issuer, certNamesKey)
+	}
+}
+
+// loadCertResourceLegacy loads a certificate resource from the given issuer's storage location.
+func (cfg *Config) loadCertResourceLegacy(ctx context.Context, issuer Issuer, certNamesKey string) (CertificateResource, error) {
 	certRes := CertificateResource{issuerKey: issuer.IssuerKey()}
 
 	// don't use the Lookup profile because we might be loading a wildcard cert which is rejected by the Lookup profile
 	normalizedName, err := idna.ToASCII(certNamesKey)
 	if err != nil {
 		return CertificateResource{}, fmt.Errorf("converting '%s' to ASCII: %v", certNamesKey, err)
-	}
-
-	// Try to load the certificate resource as a single entity.
-	// This duplication is needed during the transition phase.
-	// TODO: Remove the individual loads all certificates have been migrated.
-	certResourceKey := StorageKeys.CertificateResource(issuer.IssuerKey(), normalizedName)
-	certResourceEncoded, err := cfg.Storage.Load(ctx, certResourceKey)
-	if err == nil {
-		cert, err := decodeCertResource(certResourceEncoded)
-		if err == nil {
-			cert.issuerKey = issuer.IssuerKey()
-			return cert, nil
-		}
-		// Fall through to load cert from individual keys.
 	}
 
 	keyBytes, err := cfg.Storage.Load(ctx, StorageKeys.SitePrivateKey(certRes.issuerKey, normalizedName))
@@ -268,24 +336,31 @@ func (cfg *Config) loadCertResource(ctx context.Context, issuer Issuer, certName
 	return certRes, nil
 }
 
-// StoredCertificateResource associates a certificate with its private
-// key and other useful information, for use in maintaining the
-// certificate.
-type StoredCertificateResource struct {
-	// The list of names on the certificate;
-	// for convenience only.
-	SANs []string `json:"sans,omitempty"`
+// loadCertResourceBundle loads a certificate resource from the given issuer's storage location as bundle.
+func (cfg *Config) loadCertResourceBundle(ctx context.Context, issuer Issuer, certNamesKey string) (CertificateResource, error) {
+	// don't use the Lookup profile because we might be loading a wildcard cert which is rejected by the Lookup profile
+	normalizedName, err := idna.ToASCII(certNamesKey)
+	if err != nil {
+		return CertificateResource{}, fmt.Errorf("converting '%s' to ASCII: %v", certNamesKey, err)
+	}
 
-	// The PEM-encoding of DER-encoded ASN.1 data
-	// for the cert or chain.
-	CertificatePEM []byte `json:"certificate_pem,omitempty"`
+	key := StorageKeys.CertificateResource(issuer.IssuerKey(), normalizedName)
+	encoded, err := cfg.Storage.Load(ctx, key)
+	if err != nil {
+		return CertificateResource{}, err
+	}
 
-	// The PEM-encoding of the certificate's private key.
-	PrivateKeyPEM []byte `json:"private_key_pem,omitempty"`
+	certRes, err := decodeCertResource(encoded)
+	if err != nil {
+		return CertificateResource{}, fmt.Errorf("decoding certificate metadata: %v", err)
+	}
+	certRes.issuerKey = issuer.IssuerKey()
 
-	// Any extra information associated with the certificate,
-	// usually provided by the issuer implementation.
-	IssuerData json.RawMessage `json:"issuer_data,omitempty"`
+	if _, err := tls.X509KeyPair(certRes.PrivateKeyPEM, certRes.CertificatePEM); err != nil {
+		return CertificateResource{}, fmt.Errorf("unable to validate integrity of certificate resource bundle for: %v", key)
+	}
+
+	return certRes, nil
 }
 
 type storedCertificate struct {

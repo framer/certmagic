@@ -255,7 +255,7 @@ func (keys KeyBuilder) SiteMeta(issuerKey, domain string) string {
 // the given issuerKey.
 func (keys KeyBuilder) CertificateResource(issuerKey, domain string) string {
 	safeDomain := keys.Safe(domain)
-	return path.Join(keys.CertsSitePrefix(issuerKey, domain), safeDomain+".res")
+	return path.Join(keys.CertsSitePrefix(issuerKey, domain), safeDomain+".bundle")
 }
 
 // OCSPStaple returns a key for the OCSP staple associated
