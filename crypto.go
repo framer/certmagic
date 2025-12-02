@@ -34,7 +34,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/caarlos0/log"
 	"github.com/klauspost/cpuid/v2"
 	"github.com/zeebo/blake3"
 	"go.uber.org/zap"
@@ -160,7 +159,7 @@ func (cfg *Config) saveCertResource(ctx context.Context, issuer Issuer, cert Cer
 		// Errors that occured while storing the bundle will only be logged as warning.
 		// The legacy storage mechanism still determines the final success or failure.
 		if err := cfg.saveCertResourceBundle(ctx, issuer, cert); err != nil {
-			log.Warn("unable to store certificate resource bundle",
+			cfg.Logger.Warn("unable to store certificate resource bundle",
 				zap.String("issuer", issuer.IssuerKey()),
 				zap.String("domain", cert.NamesKey()),
 				zap.Error(err))
@@ -356,7 +355,7 @@ func (cfg *Config) loadCertResourceBundle(ctx context.Context, issuer Issuer, ce
 	}
 	certRes.issuerKey = issuer.IssuerKey()
 
-	if _, err := tls.X509KeyPair(certRes.PrivateKeyPEM, certRes.CertificatePEM); err != nil {
+	if _, err := tls.X509KeyPair(certRes.CertificatePEM, certRes.PrivateKeyPEM); err != nil {
 		return CertificateResource{}, fmt.Errorf("unable to validate integrity of certificate resource bundle for: %v", key)
 	}
 

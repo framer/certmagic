@@ -154,3 +154,326 @@ func mustJSON(val any) []byte {
 	}
 	return result
 }
+
+// Test certificate and key for bundle mode tests
+const testCertPEM = `-----BEGIN CERTIFICATE-----
+MIIBgDCCASegAwIBAgIUZ8ef3RJ8VIYFnqsK11i74ms+T+8wCgYIKoZIzj0EAwIw
+FjEUMBIGA1UEAwwLZXhhbXBsZS5jb20wHhcNMjUxMjAyMTE1NjE4WhcNMjYxMjAy
+MTE1NjE4WjAWMRQwEgYDVQQDDAtleGFtcGxlLmNvbTBZMBMGByqGSM49AgEGCCqG
+SM49AwEHA0IABEG5s2FbSkBKBImV4mv5k6iXX7bC23oVC/8pxuPCMCV/CpWpBbnB
+CagGQ/xjeMsfdFLVMmYWhvvUtvwLC7dCr0mjUzBRMB0GA1UdDgQWBBSIa6X5luCf
+7PXFyTJI1j7hNZD1wzAfBgNVHSMEGDAWgBSIa6X5luCf7PXFyTJI1j7hNZD1wzAP
+BgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0cAMEQCIFFrJ+/KgnOAFr+/mgW0
+Aha54okhtZ2xfc/BmoxBrQ10AiAH/nAINmhmDbj+l5Q8g9wFbWz4tLHJmJwKVQBG
+zywvYA==
+-----END CERTIFICATE-----`
+
+const testKeyPEM = `-----BEGIN EC PRIVATE KEY-----
+MHcCAQEEIL+JOk55ogoK9AyCEep1ao1Rhbb1RCFma0kMzu3znvJ6oAoGCCqGSM49
+AwEHoUQDQgAEQbmzYVtKQEoEiZXia/mTqJdftsLbehUL/ynG48IwJX8KlakFucEJ
+qAZD/GN4yx90UtUyZhaG+9S2/AsLt0KvSQ==
+-----END EC PRIVATE KEY-----`
+
+func TestStorageModeLegacy(t *testing.T) {
+	ctx := context.Background()
+
+	// Set legacy storage mode
+	originalEnv := os.Getenv(StorageModeEnv)
+	defer os.Setenv(StorageModeEnv, originalEnv)
+	os.Setenv(StorageModeEnv, StorageModeLegacy)
+
+	am := &ACMEIssuer{CA: "https://example.com/acme/directory"}
+	testConfig := &Config{
+		Issuers:   []Issuer{am},
+		Storage:   &FileStorage{Path: "./_testdata_tmp_legacy"},
+		Logger:    defaultTestLogger,
+		certCache: new(Cache),
+	}
+	am.config = testConfig
+
+	testStorageDir := testConfig.Storage.(*FileStorage).Path
+	defer func() {
+		err := os.RemoveAll(testStorageDir)
+		if err != nil {
+			t.Fatalf("Could not remove temporary storage directory (%s): %v", testStorageDir, err)
+		}
+	}()
+
+	domain := "example.com"
+	certContents := "certificate"
+	keyContents := "private key"
+
+	cert := CertificateResource{
+		SANs:           []string{domain},
+		PrivateKeyPEM:  []byte(keyContents),
+		CertificatePEM: []byte(certContents),
+		IssuerData: mustJSON(acme.Certificate{
+			URL: "https://example.com/cert",
+		}),
+		issuerKey: am.IssuerKey(),
+	}
+
+	err := testConfig.saveCertResource(ctx, am, cert)
+	if err != nil {
+		t.Fatalf("Expected no error, got: %v", err)
+	}
+
+	// Verify legacy files exist (.key, .crt, .json)
+	issuerKey := am.IssuerKey()
+	keyPath := StorageKeys.SitePrivateKey(issuerKey, domain)
+	certPath := StorageKeys.SiteCert(issuerKey, domain)
+	metaPath := StorageKeys.SiteMeta(issuerKey, domain)
+
+	if !testConfig.Storage.Exists(ctx, keyPath) {
+		t.Errorf("Expected private key file to exist at %s", keyPath)
+	}
+	if !testConfig.Storage.Exists(ctx, certPath) {
+		t.Errorf("Expected certificate file to exist at %s", certPath)
+	}
+	if !testConfig.Storage.Exists(ctx, metaPath) {
+		t.Errorf("Expected metadata file to exist at %s", metaPath)
+	}
+
+	// Verify bundle file does NOT exist
+	bundlePath := StorageKeys.CertificateResource(issuerKey, domain)
+	if testConfig.Storage.Exists(ctx, bundlePath) {
+		t.Errorf("Expected bundle file NOT to exist at %s in legacy mode", bundlePath)
+	}
+
+	// Verify we can load it back
+	siteData, err := testConfig.loadCertResource(ctx, am, domain)
+	if err != nil {
+		t.Fatalf("Expected no error reading site, got: %v", err)
+	}
+	if string(siteData.PrivateKeyPEM) != keyContents {
+		t.Errorf("Expected private key %q, got %q", keyContents, string(siteData.PrivateKeyPEM))
+	}
+	if string(siteData.CertificatePEM) != certContents {
+		t.Errorf("Expected certificate %q, got %q", certContents, string(siteData.CertificatePEM))
+	}
+}
+
+func TestStorageModeBundle(t *testing.T) {
+	ctx := context.Background()
+
+	// Set bundle storage mode
+	originalEnv := os.Getenv(StorageModeEnv)
+	defer os.Setenv(StorageModeEnv, originalEnv)
+	os.Setenv(StorageModeEnv, StorageModeBundle)
+
+	am := &ACMEIssuer{CA: "https://example.com/acme/directory"}
+	testConfig := &Config{
+		Issuers:   []Issuer{am},
+		Storage:   &FileStorage{Path: "./_testdata_tmp_bundle"},
+		Logger:    defaultTestLogger,
+		certCache: new(Cache),
+	}
+	am.config = testConfig
+
+	testStorageDir := testConfig.Storage.(*FileStorage).Path
+	defer func() {
+		err := os.RemoveAll(testStorageDir)
+		if err != nil {
+			t.Fatalf("Could not remove temporary storage directory (%s): %v", testStorageDir, err)
+		}
+	}()
+
+	domain := "example.com"
+
+	cert := CertificateResource{
+		SANs:           []string{domain},
+		PrivateKeyPEM:  []byte(testKeyPEM),
+		CertificatePEM: []byte(testCertPEM),
+		IssuerData: mustJSON(acme.Certificate{
+			URL: "https://example.com/cert",
+		}),
+		issuerKey: am.IssuerKey(),
+	}
+
+	err := testConfig.saveCertResource(ctx, am, cert)
+	if err != nil {
+		t.Fatalf("Expected no error, got: %v", err)
+	}
+
+	// Verify bundle file exists
+	issuerKey := am.IssuerKey()
+	bundlePath := StorageKeys.CertificateResource(issuerKey, domain)
+
+	if !testConfig.Storage.Exists(ctx, bundlePath) {
+		t.Errorf("Expected bundle file to exist at %s", bundlePath)
+	}
+
+	// Verify legacy files do NOT exist
+	keyPath := StorageKeys.SitePrivateKey(issuerKey, domain)
+	certPath := StorageKeys.SiteCert(issuerKey, domain)
+	metaPath := StorageKeys.SiteMeta(issuerKey, domain)
+
+	if testConfig.Storage.Exists(ctx, keyPath) {
+		t.Errorf("Expected private key file NOT to exist at %s in bundle mode", keyPath)
+	}
+	if testConfig.Storage.Exists(ctx, certPath) {
+		t.Errorf("Expected certificate file NOT to exist at %s in bundle mode", certPath)
+	}
+	if testConfig.Storage.Exists(ctx, metaPath) {
+		t.Errorf("Expected metadata file NOT to exist at %s in bundle mode", metaPath)
+	}
+
+	// Verify we can load it back
+	siteData, err := testConfig.loadCertResource(ctx, am, domain)
+	if err != nil {
+		t.Fatalf("Expected no error reading site, got: %v", err)
+	}
+	if string(siteData.PrivateKeyPEM) != testKeyPEM {
+		t.Errorf("Private key mismatch")
+	}
+	if string(siteData.CertificatePEM) != testCertPEM {
+		t.Errorf("Certificate mismatch")
+	}
+}
+
+func TestStorageModeTransition(t *testing.T) {
+	ctx := context.Background()
+
+	// Set transition storage mode
+	originalEnv := os.Getenv(StorageModeEnv)
+	defer os.Setenv(StorageModeEnv, originalEnv)
+	os.Setenv(StorageModeEnv, StorageModeTransition)
+
+	am := &ACMEIssuer{CA: "https://example.com/acme/directory"}
+	testConfig := &Config{
+		Issuers:   []Issuer{am},
+		Storage:   &FileStorage{Path: "./_testdata_tmp_transition"},
+		Logger:    defaultTestLogger,
+		certCache: new(Cache),
+	}
+	am.config = testConfig
+
+	testStorageDir := testConfig.Storage.(*FileStorage).Path
+	defer func() {
+		err := os.RemoveAll(testStorageDir)
+		if err != nil {
+			t.Fatalf("Could not remove temporary storage directory (%s): %v", testStorageDir, err)
+		}
+	}()
+
+	domain := "example.com"
+
+	cert := CertificateResource{
+		SANs:           []string{domain},
+		PrivateKeyPEM:  []byte(testKeyPEM),
+		CertificatePEM: []byte(testCertPEM),
+		IssuerData: mustJSON(acme.Certificate{
+			URL: "https://example.com/cert",
+		}),
+		issuerKey: am.IssuerKey(),
+	}
+
+	err := testConfig.saveCertResource(ctx, am, cert)
+	if err != nil {
+		t.Fatalf("Expected no error, got: %v", err)
+	}
+
+	// Verify BOTH legacy and bundle files exist in transition mode
+	issuerKey := am.IssuerKey()
+	keyPath := StorageKeys.SitePrivateKey(issuerKey, domain)
+	certPath := StorageKeys.SiteCert(issuerKey, domain)
+	metaPath := StorageKeys.SiteMeta(issuerKey, domain)
+	bundlePath := StorageKeys.CertificateResource(issuerKey, domain)
+
+	if !testConfig.Storage.Exists(ctx, keyPath) {
+		t.Errorf("Expected private key file to exist at %s in transition mode", keyPath)
+	}
+	if !testConfig.Storage.Exists(ctx, certPath) {
+		t.Errorf("Expected certificate file to exist at %s in transition mode", certPath)
+	}
+	if !testConfig.Storage.Exists(ctx, metaPath) {
+		t.Errorf("Expected metadata file to exist at %s in transition mode", metaPath)
+	}
+	if !testConfig.Storage.Exists(ctx, bundlePath) {
+		t.Errorf("Expected bundle file to exist at %s in transition mode", bundlePath)
+	}
+
+	// Verify we can load it back (should prefer bundle)
+	siteData, err := testConfig.loadCertResource(ctx, am, domain)
+	if err != nil {
+		t.Fatalf("Expected no error reading site, got: %v", err)
+	}
+	if string(siteData.PrivateKeyPEM) != testKeyPEM {
+		t.Errorf("Private key mismatch")
+	}
+	if string(siteData.CertificatePEM) != testCertPEM {
+		t.Errorf("Certificate mismatch")
+	}
+}
+
+func TestStorageModeTransitionFallback(t *testing.T) {
+	ctx := context.Background()
+
+	// Set transition storage mode
+	originalEnv := os.Getenv(StorageModeEnv)
+	defer os.Setenv(StorageModeEnv, originalEnv)
+	os.Setenv(StorageModeEnv, StorageModeTransition)
+
+	am := &ACMEIssuer{CA: "https://example.com/acme/directory"}
+	testConfig := &Config{
+		Issuers:   []Issuer{am},
+		Storage:   &FileStorage{Path: "./_testdata_tmp_transition_fallback"},
+		Logger:    defaultTestLogger,
+		certCache: new(Cache),
+	}
+	am.config = testConfig
+
+	testStorageDir := testConfig.Storage.(*FileStorage).Path
+	defer func() {
+		err := os.RemoveAll(testStorageDir)
+		if err != nil {
+			t.Fatalf("Could not remove temporary storage directory (%s): %v", testStorageDir, err)
+		}
+	}()
+
+	domain := "example.com"
+	certContents := "certificate"
+	keyContents := "private key"
+
+	cert := CertificateResource{
+		SANs:           []string{domain},
+		PrivateKeyPEM:  []byte(keyContents),
+		CertificatePEM: []byte(certContents),
+		IssuerData: mustJSON(acme.Certificate{
+			URL: "https://example.com/cert",
+		}),
+		issuerKey: am.IssuerKey(),
+	}
+
+	// First, save using legacy mode to simulate old data
+	os.Setenv(StorageModeEnv, StorageModeLegacy)
+	err := testConfig.saveCertResource(ctx, am, cert)
+	if err != nil {
+		t.Fatalf("Expected no error saving in legacy mode, got: %v", err)
+	}
+
+	// Verify only legacy files exist
+	issuerKey := am.IssuerKey()
+	keyPath := StorageKeys.SitePrivateKey(issuerKey, domain)
+	bundlePath := StorageKeys.CertificateResource(issuerKey, domain)
+
+	if !testConfig.Storage.Exists(ctx, keyPath) {
+		t.Errorf("Expected private key file to exist at %s", keyPath)
+	}
+	if testConfig.Storage.Exists(ctx, bundlePath) {
+		t.Errorf("Expected bundle file NOT to exist at %s yet", bundlePath)
+	}
+
+	// Now switch to transition mode and try to load - should fall back to legacy
+	os.Setenv(StorageModeEnv, StorageModeTransition)
+	siteData, err := testConfig.loadCertResource(ctx, am, domain)
+	if err != nil {
+		t.Fatalf("Expected no error reading site in transition mode with fallback, got: %v", err)
+	}
+	if string(siteData.PrivateKeyPEM) != keyContents {
+		t.Errorf("Expected private key %q, got %q", keyContents, string(siteData.PrivateKeyPEM))
+	}
+	if string(siteData.CertificatePEM) != certContents {
+		t.Errorf("Expected certificate %q, got %q", certContents, string(siteData.CertificatePEM))
+	}
+}
