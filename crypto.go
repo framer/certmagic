@@ -356,7 +356,7 @@ func (cfg *Config) loadCertResourceBundle(ctx context.Context, issuer Issuer, ce
 	certRes.issuerKey = issuer.IssuerKey()
 
 	if _, err := tls.X509KeyPair(certRes.CertificatePEM, certRes.PrivateKeyPEM); err != nil {
-		return CertificateResource{}, fmt.Errorf("unable to validate integrity of certificate resource bundle for: %v", key)
+		return CertificateResource{}, fmt.Errorf("unable to validate integrity of certificate resource bundle for %q: %w", key, err)
 	}
 
 	return certRes, nil
