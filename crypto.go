@@ -168,10 +168,6 @@ const (
 func (cfg *Config) saveCertResource(ctx context.Context, issuer Issuer, cert CertificateResource) error {
 	switch os.Getenv(StorageModeEnv) {
 	case StorageModeTransition:
-		// In transition storage mode, certificate resources will be stored as a bundle
-		// in addition to the legacy storage mechanism.
-		// Errors that occured while storing the bundle will only be logged as warning.
-		// The legacy storage mechanism still determines the final success or failure.
 		if err := cfg.saveCertResourceBundle(ctx, issuer, cert); err != nil {
 			cfg.Logger.Warn("unable to store certificate resource bundle",
 				zap.String("issuer", issuer.IssuerKey()),
@@ -180,11 +176,8 @@ func (cfg *Config) saveCertResource(ctx context.Context, issuer Issuer, cert Cer
 		}
 		return cfg.saveCertResourceLegacy(ctx, issuer, cert)
 	case StorageModeBundle:
-		// In bundle storage mode, certifiate resources will be stored as a single ".bundle" entity.
 		return cfg.saveCertResourceBundle(ctx, issuer, cert)
 	default:
-		// In legacy storage mode, certifiate resources will be stored unmodified
-		// in their seperate ".key", ".cert", ".json" entities.
 		return cfg.saveCertResourceLegacy(ctx, issuer, cert)
 	}
 }
@@ -302,16 +295,14 @@ func (cfg *Config) loadCertResourceAnyIssuer(ctx context.Context, certNamesKey s
 
 func (cfg *Config) loadCertResource(ctx context.Context, issuer Issuer, certNamesKey string) (CertificateResource, error) {
 	switch os.Getenv(StorageModeEnv) {
-	case StorageModeBundle:
-		return cfg.loadCertResourceBundle(ctx, issuer, certNamesKey)
 	case StorageModeTransition:
-		// Try loading the certificate from the bundle first.
-		// Fallback to legacy storage on failure.
 		certRes, err := cfg.loadCertResourceBundle(ctx, issuer, certNamesKey)
 		if err == nil {
 			return certRes, nil
 		}
 		return cfg.loadCertResourceLegacy(ctx, issuer, certNamesKey)
+	case StorageModeBundle:
+		return cfg.loadCertResourceBundle(ctx, issuer, certNamesKey)
 	default:
 		return cfg.loadCertResourceLegacy(ctx, issuer, certNamesKey)
 	}
@@ -357,7 +348,7 @@ func (cfg *Config) loadCertResourceBundle(ctx context.Context, issuer Issuer, ce
 		return CertificateResource{}, fmt.Errorf("converting '%s' to ASCII: %v", certNamesKey, err)
 	}
 
-	key := StorageKeys.CertificateResource(issuer.IssuerKey(), normalizedName)
+	key := StorageKeys.SiteBundle(issuer.IssuerKey(), normalizedName)
 	encoded, err := cfg.Storage.Load(ctx, key)
 	if err != nil {
 		return CertificateResource{}, err

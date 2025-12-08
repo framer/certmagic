@@ -1314,6 +1314,26 @@ func (cfg *Config) storageHasCertResourcesBundle(ctx context.Context, issuer Iss
 // certificate, private key, and metadata file for domain from the
 // issuer with the given issuer key.
 func (cfg *Config) deleteSiteAssets(ctx context.Context, issuerKey, domain string) error {
+	switch os.Getenv(StorageModeEnv) {
+	case StorageModeTransition:
+		if err := cfg.deleteSiteAssetsBundle(ctx, issuerKey, domain); err != nil {
+			cfg.Logger.Warn("unable to delete certificate resource bundle",
+				zap.String("issuer", issuerKey),
+				zap.String("domain", domain),
+				zap.Error(err))
+		}
+		return cfg.deleteSiteAssetsLegacy(ctx, issuerKey, domain)
+	case StorageModeBundle:
+		return cfg.deleteSiteAssetsBundle(ctx, issuerKey, domain)
+	default:
+		return cfg.deleteSiteAssetsLegacy(ctx, issuerKey, domain)
+	}
+}
+
+// deleteSiteAssetsLegacy deletes the folder in storage containing the
+// certificate, private key, and metadata file for domain from the
+// issuer with the given issuer key.
+func (cfg *Config) deleteSiteAssetsLegacy(ctx context.Context, issuerKey, domain string) error {
 	err := cfg.Storage.Delete(ctx, StorageKeys.SiteCert(issuerKey, domain))
 	if err != nil {
 		return fmt.Errorf("deleting certificate file: %v", err)
@@ -1329,6 +1349,16 @@ func (cfg *Config) deleteSiteAssets(ctx context.Context, issuerKey, domain strin
 	err = cfg.Storage.Delete(ctx, StorageKeys.CertsSitePrefix(issuerKey, domain))
 	if err != nil {
 		return fmt.Errorf("deleting site asset folder: %v", err)
+	}
+	return nil
+}
+
+// deleteSiteAssetsBundle deletes the folder in storage containing the
+// certificate bundle for domain from the issuer with the given issuer key.
+func (cfg *Config) deleteSiteAssetsBundle(ctx context.Context, issuerKey, domain string) error {
+	err := cfg.Storage.Delete(ctx, StorageKeys.SiteBundle(issuerKey, domain))
+	if err != nil {
+		return fmt.Errorf("deleting certificate bundle: %v", err)
 	}
 	return nil
 }
