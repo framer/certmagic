@@ -253,7 +253,7 @@ func TestStorageModeLegacy(t *testing.T) {
 	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SitePrivateKey(issuerKey, domain), true)
 	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SiteCert(issuerKey, domain), true)
 	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SiteMeta(issuerKey, domain), true)
-	assertFileExists(t, ctx, cfg.Storage, StorageKeys.CertificateResource(issuerKey, domain), false)
+	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SiteBundle(issuerKey, domain), false)
 
 	loaded, err := cfg.loadCertResource(ctx, am, domain)
 	if err != nil {
@@ -275,7 +275,7 @@ func TestStorageModeBundle(t *testing.T) {
 	}
 
 	issuerKey := am.IssuerKey()
-	assertFileExists(t, ctx, cfg.Storage, StorageKeys.CertificateResource(issuerKey, domain), true)
+	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SiteBundle(issuerKey, domain), true)
 	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SitePrivateKey(issuerKey, domain), false)
 	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SiteCert(issuerKey, domain), false)
 	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SiteMeta(issuerKey, domain), false)
@@ -304,7 +304,7 @@ func TestStorageModeTransition(t *testing.T) {
 	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SitePrivateKey(issuerKey, domain), true)
 	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SiteCert(issuerKey, domain), true)
 	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SiteMeta(issuerKey, domain), true)
-	assertFileExists(t, ctx, cfg.Storage, StorageKeys.CertificateResource(issuerKey, domain), true)
+	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SiteBundle(issuerKey, domain), true)
 
 	loaded, err := cfg.loadCertResource(ctx, am, domain)
 	if err != nil {
@@ -329,7 +329,7 @@ func TestStorageModeTransitionFallback(t *testing.T) {
 
 	issuerKey := am.IssuerKey()
 	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SitePrivateKey(issuerKey, domain), true)
-	assertFileExists(t, ctx, cfg.Storage, StorageKeys.CertificateResource(issuerKey, domain), false)
+	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SiteBundle(issuerKey, domain), false)
 
 	// Switch to transition mode and verify fallback to legacy works
 	os.Setenv(StorageModeEnv, StorageModeTransition)

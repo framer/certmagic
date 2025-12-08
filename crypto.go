@@ -142,6 +142,20 @@ func fastHash(input []byte) string {
 }
 
 const (
+	// Storage mode controls the format in which certificates are stored in `Storage`.
+	//
+	// Formats:
+	// - legacy: Store cert, privkey and meta as three separate storage items (.cert, .key, .json).
+	// - bundle: Store cert, privkey and meta as a single, bundled storage item (.bundle).
+	//
+	// Modes:
+	// - legacy:     Store and load certificates in legacy format.
+	// - transition: Store and load certificates in legacy and bundle format.
+	// - bundle:     Store and load certificates in bundle format.
+	//
+	// In the transition mode, failures around reads and writes of the bundle are soft.
+	// They should only log errors and try to work with the legacy format as fallback.
+	// Operations on the legacy format are hard-failures, implying that errors should be propagated up.
 	StorageModeEnv = "CERTMAGIC_STORAGE_MODE"
 
 	StorageModeLegacy     = "legacy"
@@ -216,7 +230,7 @@ func (cfg *Config) saveCertResourceBundle(ctx context.Context, issuer Issuer, ce
 	issuerKey := issuer.IssuerKey()
 	certKey := cert.NamesKey()
 
-	key := StorageKeys.CertificateResource(issuerKey, certKey)
+	key := StorageKeys.SiteBundle(issuerKey, certKey)
 	return cfg.Storage.Store(ctx, key, encoded)
 }
 

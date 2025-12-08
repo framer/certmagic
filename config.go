@@ -32,6 +32,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -1268,9 +1269,29 @@ func (cfg *Config) checkStorage(ctx context.Context) error {
 
 // storageHasCertResources returns true if the storage
 // associated with cfg's certificate cache has all the
+// resources related to the certificate for domain.
+func (cfg *Config) storageHasCertResources(ctx context.Context, issuer Issuer, domain string) bool {
+	switch os.Getenv(StorageModeEnv) {
+	case StorageModeTransition:
+		if cfg.storageHasCertResourcesBundle(ctx, issuer, domain) {
+			return true
+		}
+		if cfg.storageHasCertResourcesLegacy(ctx, issuer, domain) {
+			return true
+		}
+		return false
+	case StorageModeBundle:
+		return cfg.storageHasCertResourcesBundle(ctx, issuer, domain)
+	default:
+		return cfg.storageHasCertResourcesLegacy(ctx, issuer, domain)
+	}
+}
+
+// storageHasCertResourcesLegacy returns true if the storage
+// associated with cfg's certificate cache has all the
 // resources related to the certificate for domain: the
 // certificate, the private key, and the metadata.
-func (cfg *Config) storageHasCertResources(ctx context.Context, issuer Issuer, domain string) bool {
+func (cfg *Config) storageHasCertResourcesLegacy(ctx context.Context, issuer Issuer, domain string) bool {
 	issuerKey := issuer.IssuerKey()
 	certKey := StorageKeys.SiteCert(issuerKey, domain)
 	keyKey := StorageKeys.SitePrivateKey(issuerKey, domain)
@@ -1278,6 +1299,15 @@ func (cfg *Config) storageHasCertResources(ctx context.Context, issuer Issuer, d
 	return cfg.Storage.Exists(ctx, certKey) &&
 		cfg.Storage.Exists(ctx, keyKey) &&
 		cfg.Storage.Exists(ctx, metaKey)
+}
+
+// storageHasCertResourcesBundle returns true if the storage
+// associated with cfg's certificate cache has the
+// certificate resource bundle for domain.
+func (cfg *Config) storageHasCertResourcesBundle(ctx context.Context, issuer Issuer, domain string) bool {
+	issuerKey := issuer.IssuerKey()
+	certBundle := StorageKeys.SiteBundle(issuerKey, domain)
+	return cfg.Storage.Exists(ctx, certBundle)
 }
 
 // deleteSiteAssets deletes the folder in storage containing the

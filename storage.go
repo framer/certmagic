@@ -250,10 +250,10 @@ func (keys KeyBuilder) SiteMeta(issuerKey, domain string) string {
 	return path.Join(keys.CertsSitePrefix(issuerKey, domain), safeDomain+".json")
 }
 
-// CertificateResource returns the path to the resource file for domain that
+// SiteBundle returns the path to the resource file for domain that
 // is associated with the certificate from the given issuer with
 // the given issuerKey.
-func (keys KeyBuilder) CertificateResource(issuerKey, domain string) string {
+func (keys KeyBuilder) SiteBundle(issuerKey, domain string) string {
 	safeDomain := keys.Safe(domain)
 	return path.Join(keys.CertsSitePrefix(issuerKey, domain), safeDomain+".bundle")
 }
