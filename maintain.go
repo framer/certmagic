@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path"
 	"runtime"
 	"strings"
@@ -427,9 +428,25 @@ func (cfg *Config) storageHasNewerARI(ctx context.Context, cert Certificate) (bo
 	return false, acme.RenewalInfo{}, nil
 }
 
-// loadStoredACMECertificateMetadata loads the stored ACME certificate data
-// from the cert's sidecar JSON file.
+// loadStoredACMECertificateMetadata loads the stored ACME certificate data.
 func (cfg *Config) loadStoredACMECertificateMetadata(ctx context.Context, cert Certificate) (acme.Certificate, error) {
+	switch os.Getenv(StorageModeEnv) {
+	case StorageModeTransition:
+		acmecert, err := cfg.loadStoredACMECertificateMetadataBundle(ctx, cert)
+		if err == nil {
+			return acmecert, nil
+		}
+		return cfg.loadStoredACMECertificateMetadataLegacy(ctx, cert)
+	case StorageModeBundle:
+		return cfg.loadStoredACMECertificateMetadataBundle(ctx, cert)
+	default:
+		return cfg.loadStoredACMECertificateMetadataLegacy(ctx, cert)
+	}
+}
+
+// loadStoredACMECertificateMetadataLegacy loads the stored ACME certificate data
+// from the cert's sidecar JSON file.
+func (cfg *Config) loadStoredACMECertificateMetadataLegacy(ctx context.Context, cert Certificate) (acme.Certificate, error) {
 	metaBytes, err := cfg.Storage.Load(ctx, StorageKeys.SiteMeta(cert.issuerKey, cert.Names[0]))
 	if err != nil {
 		return acme.Certificate{}, fmt.Errorf("loading cert metadata: %w", err)
@@ -437,6 +454,26 @@ func (cfg *Config) loadStoredACMECertificateMetadata(ctx context.Context, cert C
 
 	var certRes CertificateResource
 	if err = json.Unmarshal(metaBytes, &certRes); err != nil {
+		return acme.Certificate{}, fmt.Errorf("unmarshaling cert metadata: %w", err)
+	}
+
+	var acmeCert acme.Certificate
+	if err = json.Unmarshal(certRes.IssuerData, &acmeCert); err != nil {
+		return acme.Certificate{}, fmt.Errorf("unmarshaling potential ACME issuer metadata: %v", err)
+	}
+
+	return acmeCert, nil
+}
+
+// loadStoredACMECertificateMetadataBundle loads the stored ACME certificate data from the cert bundle.
+func (cfg *Config) loadStoredACMECertificateMetadataBundle(ctx context.Context, cert Certificate) (acme.Certificate, error) {
+	bundleBytes, err := cfg.Storage.Load(ctx, StorageKeys.SiteBundle(cert.issuerKey, cert.Names[0]))
+	if err != nil {
+		return acme.Certificate{}, fmt.Errorf("loading cert metadata: %w", err)
+	}
+
+	certRes, err := decodeCertResource(bundleBytes)
+	if err != nil {
 		return acme.Certificate{}, fmt.Errorf("unmarshaling cert metadata: %w", err)
 	}
 
