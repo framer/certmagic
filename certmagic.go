@@ -509,7 +509,7 @@ const (
 	//
 	// Modes:
 	// - legacy:     Store and load certificates in legacy format.
-	// - transition: Store and load certificates in legacy and bundle format.
+	// - transition: Store in legacy and bundle format, load as bundle with fallback to legacy format.
 	// - bundle:     Store and load certificates in bundle format.
 	//
 	// In the transition mode, failures around reads and writes of the bundle are soft.
