@@ -1276,10 +1276,7 @@ func (cfg *Config) storageHasCertResources(ctx context.Context, issuer Issuer, d
 		if cfg.storageHasCertResourcesBundle(ctx, issuer, domain) {
 			return true
 		}
-		if cfg.storageHasCertResourcesLegacy(ctx, issuer, domain) {
-			return true
-		}
-		return false
+		return cfg.storageHasCertResourcesLegacy(ctx, issuer, domain)
 	case StorageModeBundle:
 		return cfg.storageHasCertResourcesBundle(ctx, issuer, domain)
 	default:
