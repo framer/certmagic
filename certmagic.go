@@ -515,6 +515,8 @@ const (
 	// In the transition mode, failures around reads and writes of the bundle are soft.
 	// They should only log errors and try to work with the legacy format as fallback.
 	// Operations on the legacy format are hard-failures, implying that errors should be propagated up.
+	//
+	// The storage mode is controlled via the CERTMAGIC_STORAGE_MODE environment variable
 	StorageModeEnv = "CERTMAGIC_STORAGE_MODE"
 
 	StorageModeLegacy     = "legacy"

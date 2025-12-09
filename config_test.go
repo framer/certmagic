@@ -155,25 +155,6 @@ func mustJSON(val any) []byte {
 	return result
 }
 
-// Test certificate and key for bundle mode tests
-const testCertPEM = `-----BEGIN CERTIFICATE-----
-MIIBgDCCASegAwIBAgIUZ8ef3RJ8VIYFnqsK11i74ms+T+8wCgYIKoZIzj0EAwIw
-FjEUMBIGA1UEAwwLZXhhbXBsZS5jb20wHhcNMjUxMjAyMTE1NjE4WhcNMjYxMjAy
-MTE1NjE4WjAWMRQwEgYDVQQDDAtleGFtcGxlLmNvbTBZMBMGByqGSM49AgEGCCqG
-SM49AwEHA0IABEG5s2FbSkBKBImV4mv5k6iXX7bC23oVC/8pxuPCMCV/CpWpBbnB
-CagGQ/xjeMsfdFLVMmYWhvvUtvwLC7dCr0mjUzBRMB0GA1UdDgQWBBSIa6X5luCf
-7PXFyTJI1j7hNZD1wzAfBgNVHSMEGDAWgBSIa6X5luCf7PXFyTJI1j7hNZD1wzAP
-BgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0cAMEQCIFFrJ+/KgnOAFr+/mgW0
-Aha54okhtZ2xfc/BmoxBrQ10AiAH/nAINmhmDbj+l5Q8g9wFbWz4tLHJmJwKVQBG
-zywvYA==
------END CERTIFICATE-----`
-
-const testKeyPEM = `-----BEGIN EC PRIVATE KEY-----
-MHcCAQEEIL+JOk55ogoK9AyCEep1ao1Rhbb1RCFma0kMzu3znvJ6oAoGCCqGSM49
-AwEHoUQDQgAEQbmzYVtKQEoEiZXia/mTqJdftsLbehUL/ynG48IwJX8KlakFucEJ
-qAZD/GN4yx90UtUyZhaG+9S2/AsLt0KvSQ==
------END EC PRIVATE KEY-----`
-
 // testStorageModeSetup creates a test config with the specified storage mode
 func testStorageModeSetup(t *testing.T, mode, storagePath string) (*Config, *ACMEIssuer, func()) {
 	t.Helper()
@@ -197,36 +178,30 @@ func testStorageModeSetup(t *testing.T, mode, storagePath string) (*Config, *ACM
 	return cfg, am, cleanup
 }
 
-// makeCertResource creates a test certificate resource
 func makeCertResource(am *ACMEIssuer, domain string, useLegacyContent bool) CertificateResource {
-	var keyPEM, certPEM []byte
-	if useLegacyContent {
-		keyPEM, certPEM = []byte("private key"), []byte("certificate")
-	} else {
-		keyPEM, certPEM = []byte(testKeyPEM), []byte(testCertPEM)
-	}
-
 	return CertificateResource{
 		SANs:           []string{domain},
-		PrivateKeyPEM:  keyPEM,
-		CertificatePEM: certPEM,
+		PrivateKeyPEM:  []byte("private key"),
+		CertificatePEM: []byte("certificate"),
 		IssuerData:     mustJSON(acme.Certificate{URL: "https://example.com/cert"}),
 		issuerKey:      am.IssuerKey(),
 	}
 }
 
-// assertFileExists checks if a file exists at the given path
-func assertFileExists(t *testing.T, ctx context.Context, storage Storage, path string, shouldExist bool) {
+func assertFileExists(t *testing.T, ctx context.Context, storage Storage, path string) {
 	t.Helper()
-	exists := storage.Exists(ctx, path)
-	if shouldExist && !exists {
+	if !storage.Exists(ctx, path) {
 		t.Errorf("Expected file to exist at %s", path)
-	} else if !shouldExist && exists {
+	}
+}
+
+func assertFileNotExists(t *testing.T, ctx context.Context, storage Storage, path string) {
+	t.Helper()
+	if storage.Exists(ctx, path) {
 		t.Errorf("Expected file NOT to exist at %s", path)
 	}
 }
 
-// assertCertResourceContent verifies the loaded certificate matches expected content
 func assertCertResourceContent(t *testing.T, loaded CertificateResource, expectedKey, expectedCert string) {
 	t.Helper()
 	if string(loaded.PrivateKeyPEM) != expectedKey {
@@ -250,10 +225,10 @@ func TestStorageModeLegacy(t *testing.T) {
 	}
 
 	issuerKey := am.IssuerKey()
-	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SitePrivateKey(issuerKey, domain), true)
-	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SiteCert(issuerKey, domain), true)
-	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SiteMeta(issuerKey, domain), true)
-	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SiteBundle(issuerKey, domain), false)
+	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SitePrivateKey(issuerKey, domain))
+	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SiteCert(issuerKey, domain))
+	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SiteMeta(issuerKey, domain))
+	assertFileNotExists(t, ctx, cfg.Storage, StorageKeys.SiteBundle(issuerKey, domain))
 
 	loaded, err := cfg.loadCertResource(ctx, am, domain)
 	if err != nil {
@@ -275,16 +250,16 @@ func TestStorageModeBundle(t *testing.T) {
 	}
 
 	issuerKey := am.IssuerKey()
-	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SiteBundle(issuerKey, domain), true)
-	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SitePrivateKey(issuerKey, domain), false)
-	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SiteCert(issuerKey, domain), false)
-	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SiteMeta(issuerKey, domain), false)
+	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SiteBundle(issuerKey, domain))
+	assertFileNotExists(t, ctx, cfg.Storage, StorageKeys.SitePrivateKey(issuerKey, domain))
+	assertFileNotExists(t, ctx, cfg.Storage, StorageKeys.SiteCert(issuerKey, domain))
+	assertFileNotExists(t, ctx, cfg.Storage, StorageKeys.SiteMeta(issuerKey, domain))
 
 	loaded, err := cfg.loadCertResource(ctx, am, domain)
 	if err != nil {
 		t.Fatalf("Failed to load cert resource: %v", err)
 	}
-	assertCertResourceContent(t, loaded, testKeyPEM, testCertPEM)
+	assertCertResourceContent(t, loaded, "private key", "certificate")
 }
 
 func TestStorageModeTransition(t *testing.T) {
@@ -301,16 +276,16 @@ func TestStorageModeTransition(t *testing.T) {
 
 	// Verify BOTH legacy and bundle files exist
 	issuerKey := am.IssuerKey()
-	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SitePrivateKey(issuerKey, domain), true)
-	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SiteCert(issuerKey, domain), true)
-	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SiteMeta(issuerKey, domain), true)
-	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SiteBundle(issuerKey, domain), true)
+	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SitePrivateKey(issuerKey, domain))
+	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SiteCert(issuerKey, domain))
+	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SiteMeta(issuerKey, domain))
+	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SiteBundle(issuerKey, domain))
 
 	loaded, err := cfg.loadCertResource(ctx, am, domain)
 	if err != nil {
 		t.Fatalf("Failed to load cert resource: %v", err)
 	}
-	assertCertResourceContent(t, loaded, testKeyPEM, testCertPEM)
+	assertCertResourceContent(t, loaded, "private key", "certificate")
 }
 
 func TestStorageModeTransitionFallback(t *testing.T) {
@@ -328,8 +303,8 @@ func TestStorageModeTransitionFallback(t *testing.T) {
 	}
 
 	issuerKey := am.IssuerKey()
-	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SitePrivateKey(issuerKey, domain), true)
-	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SiteBundle(issuerKey, domain), false)
+	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SitePrivateKey(issuerKey, domain))
+	assertFileNotExists(t, ctx, cfg.Storage, StorageKeys.SiteBundle(issuerKey, domain))
 
 	// Switch to transition mode and verify fallback to legacy works
 	os.Setenv(StorageModeEnv, StorageModeTransition)
