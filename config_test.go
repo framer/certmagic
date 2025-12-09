@@ -156,10 +156,9 @@ func mustJSON(val any) []byte {
 }
 
 // testStorageModeSetup creates a test config with the specified storage mode
-func testStorageModeSetup(t *testing.T, mode, storagePath string) (*Config, *ACMEIssuer, func()) {
+func testStorageModeSetup(t *testing.T, mode, storagePath string) (*Config, *ACMEIssuer) {
 	t.Helper()
-	originalEnv := os.Getenv(StorageModeEnv)
-	os.Setenv(StorageModeEnv, mode)
+	t.Setenv(StorageModeEnv, mode)
 
 	am := &ACMEIssuer{CA: "https://example.com/acme/directory"}
 	cfg := &Config{
@@ -170,12 +169,11 @@ func testStorageModeSetup(t *testing.T, mode, storagePath string) (*Config, *ACM
 	}
 	am.config = cfg
 
-	cleanup := func() {
-		os.Setenv(StorageModeEnv, originalEnv)
+	t.Cleanup(func() {
 		os.RemoveAll(storagePath)
-	}
+	})
 
-	return cfg, am, cleanup
+	return cfg, am
 }
 
 func makeCertResource(am *ACMEIssuer, domain string, useLegacyContent bool) CertificateResource {
@@ -214,8 +212,7 @@ func assertCertResourceContent(t *testing.T, loaded CertificateResource, expecte
 
 func TestStorageModeLegacy(t *testing.T) {
 	ctx := context.Background()
-	cfg, am, cleanup := testStorageModeSetup(t, StorageModeLegacy, "./_testdata_tmp_legacy")
-	defer cleanup()
+	cfg, am := testStorageModeSetup(t, StorageModeLegacy, "./_testdata_tmp_legacy")
 
 	domain := "example.com"
 	cert := makeCertResource(am, domain, true)
@@ -239,8 +236,7 @@ func TestStorageModeLegacy(t *testing.T) {
 
 func TestStorageModeBundle(t *testing.T) {
 	ctx := context.Background()
-	cfg, am, cleanup := testStorageModeSetup(t, StorageModeBundle, "./_testdata_tmp_bundle")
-	defer cleanup()
+	cfg, am := testStorageModeSetup(t, StorageModeBundle, "./_testdata_tmp_bundle")
 
 	domain := "example.com"
 	cert := makeCertResource(am, domain, false)
@@ -264,8 +260,7 @@ func TestStorageModeBundle(t *testing.T) {
 
 func TestStorageModeTransition(t *testing.T) {
 	ctx := context.Background()
-	cfg, am, cleanup := testStorageModeSetup(t, StorageModeTransition, "./_testdata_tmp_transition")
-	defer cleanup()
+	cfg, am := testStorageModeSetup(t, StorageModeTransition, "./_testdata_tmp_transition")
 
 	domain := "example.com"
 	cert := makeCertResource(am, domain, false)
@@ -290,8 +285,7 @@ func TestStorageModeTransition(t *testing.T) {
 
 func TestStorageModeTransitionFallback(t *testing.T) {
 	ctx := context.Background()
-	cfg, am, cleanup := testStorageModeSetup(t, StorageModeTransition, "./_testdata_tmp_transition_fallback")
-	defer cleanup()
+	cfg, am := testStorageModeSetup(t, StorageModeTransition, "./_testdata_tmp_transition_fallback")
 
 	domain := "example.com"
 	cert := makeCertResource(am, domain, true)
