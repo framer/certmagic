@@ -1251,24 +1251,39 @@ func (cfg *Config) forceRenew(ctx context.Context, logger *zap.Logger, cert Cert
 // moveCompromisedPrivateKey moves the private key for cert to a ".compromised" file
 // by copying the data to the new file, then deleting the old one.
 func (cfg *Config) moveCompromisedPrivateKey(ctx context.Context, cert Certificate, logger *zap.Logger) error {
+	// find the issuer that matches the cert's issuer key
+	var issuer Issuer
+	for _, iss := range cfg.Issuers {
+		if iss.IssuerKey() == cert.issuerKey {
+			issuer = iss
+			break
+		}
+	}
+	if issuer == nil {
+		return fmt.Errorf("no configured issuer matches certificate's issuer key: %s", cert.issuerKey)
+	}
+
+	// load cert resource to get private key (handles both legacy and bundle storage modes)
+	certRes, err := cfg.loadCertResource(ctx, issuer, cert.Names[0])
+	if err != nil {
+		return err
+	}
+
+	// store the compromised key for audit purposes
+	compromisedPrivKeyStorageKey := StorageKeys.SitePrivateKey(cert.issuerKey, cert.Names[0]) + ".compromised"
+	err = cfg.Storage.Store(ctx, compromisedPrivKeyStorageKey, certRes.PrivateKeyPEM)
+	if err != nil {
+		return err
+	}
+
+	// in legacy/transition mode, delete the separate private key file
+	// in bundle mode, there's no separate file (key is inside bundle which will be replaced)
 	privKeyStorageKey := StorageKeys.SitePrivateKey(cert.issuerKey, cert.Names[0])
-
-	privKeyPEM, err := cfg.Storage.Load(ctx, privKeyStorageKey)
-	if err != nil {
-		return err
-	}
-
-	compromisedPrivKeyStorageKey := privKeyStorageKey + ".compromised"
-	err = cfg.Storage.Store(ctx, compromisedPrivKeyStorageKey, privKeyPEM)
-	if err != nil {
-		// better safe than sorry: as a last resort, try deleting the key so it won't be reused
-		cfg.Storage.Delete(ctx, privKeyStorageKey)
-		return err
-	}
-
-	err = cfg.Storage.Delete(ctx, privKeyStorageKey)
-	if err != nil {
-		return err
+	if cfg.Storage.Exists(ctx, privKeyStorageKey) {
+		err = cfg.Storage.Delete(ctx, privKeyStorageKey)
+		if err != nil {
+			return err
+		}
 	}
 
 	logger.Info("removed certificate's compromised private key from use",
