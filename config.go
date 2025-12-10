@@ -753,8 +753,7 @@ func (cfg *Config) reusePrivateKey(ctx context.Context, domain string) (privKey 
 
 	for i, issuer := range issuers {
 		// see if this issuer location in storage has a private key for the domain
-		privateKeyStorageKey := StorageKeys.SitePrivateKey(issuer.IssuerKey(), domain)
-		privKeyPEM, err = cfg.Storage.Load(ctx, privateKeyStorageKey)
+		certRes, err := cfg.loadCertResource(ctx, issuer, domain)
 		if errors.Is(err, fs.ErrNotExist) {
 			err = nil // obviously, it's OK to not have a private key; so don't prevent obtaining a cert
 			continue
@@ -762,6 +761,7 @@ func (cfg *Config) reusePrivateKey(ctx context.Context, domain string) (privKey 
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("loading existing private key for reuse with issuer %s: %v", issuer.IssuerKey(), err)
 		}
+		privKeyPEM = certRes.PrivateKeyPEM
 
 		// we loaded a private key; try decoding it so we can use it
 		privKey, err = PEMDecodePrivateKey(privKeyPEM)
