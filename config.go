@@ -1102,7 +1102,8 @@ func (cfg *Config) RevokeCert(ctx context.Context, domain string, reason int, in
 			return err
 		}
 
-		if !cfg.Storage.Exists(ctx, StorageKeys.SitePrivateKey(issuerKey, domain)) {
+		// loadCertResource should already fail if private key is missing.
+		if len(certRes.PrivateKeyPEM) == 0 {
 			return fmt.Errorf("private key not found for %s", certRes.SANs)
 		}
 
