@@ -750,10 +750,11 @@ func (cfg *Config) reusePrivateKey(ctx context.Context, domain string) (privKey 
 	issuers = make([]Issuer, len(cfg.Issuers))
 	copy(issuers, cfg.Issuers)
 
+	certStore := NewCertStore(cfg.Storage, cfg.Logger)
+
 	for i, issuer := range issuers {
 		// see if this issuer location in storage has a private key for the domain
-		privateKeyStorageKey := StorageKeys.SitePrivateKey(issuer.IssuerKey(), domain)
-		privKeyPEM, err = cfg.Storage.Load(ctx, privateKeyStorageKey)
+		privKeyPEM, err = certStore.LoadPrivateKey(ctx, issuer.IssuerKey(), domain)
 		if errors.Is(err, fs.ErrNotExist) {
 			err = nil // obviously, it's OK to not have a private key; so don't prevent obtaining a cert
 			continue
@@ -1101,7 +1102,8 @@ func (cfg *Config) RevokeCert(ctx context.Context, domain string, reason int, in
 			return err
 		}
 
-		if !cfg.Storage.Exists(ctx, StorageKeys.SitePrivateKey(issuerKey, domain)) {
+		// Ensure we have the private key (it's loaded as part of the bundle/resource)
+		if len(certRes.PrivateKeyPEM) == 0 {
 			return fmt.Errorf("private key not found for %s", certRes.SANs)
 		}
 
@@ -1268,39 +1270,18 @@ func (cfg *Config) checkStorage(ctx context.Context) error {
 
 // storageHasCertResources returns true if the storage
 // associated with cfg's certificate cache has all the
-// resources related to the certificate for domain: the
-// certificate, the private key, and the metadata.
+// resources related to the certificate for domain (either
+// as a bundle or in the legacy 3-file format).
 func (cfg *Config) storageHasCertResources(ctx context.Context, issuer Issuer, domain string) bool {
-	issuerKey := issuer.IssuerKey()
-	certKey := StorageKeys.SiteCert(issuerKey, domain)
-	keyKey := StorageKeys.SitePrivateKey(issuerKey, domain)
-	metaKey := StorageKeys.SiteMeta(issuerKey, domain)
-	return cfg.Storage.Exists(ctx, certKey) &&
-		cfg.Storage.Exists(ctx, keyKey) &&
-		cfg.Storage.Exists(ctx, metaKey)
+	certStore := NewCertStore(cfg.Storage, cfg.Logger)
+	return certStore.Exists(ctx, issuer.IssuerKey(), domain)
 }
 
-// deleteSiteAssets deletes the folder in storage containing the
-// certificate, private key, and metadata file for domain from the
-// issuer with the given issuer key.
+// deleteSiteAssets deletes the certificate bundle (or legacy files)
+// for domain from the issuer with the given issuer key.
 func (cfg *Config) deleteSiteAssets(ctx context.Context, issuerKey, domain string) error {
-	err := cfg.Storage.Delete(ctx, StorageKeys.SiteCert(issuerKey, domain))
-	if err != nil {
-		return fmt.Errorf("deleting certificate file: %v", err)
-	}
-	err = cfg.Storage.Delete(ctx, StorageKeys.SitePrivateKey(issuerKey, domain))
-	if err != nil {
-		return fmt.Errorf("deleting private key: %v", err)
-	}
-	err = cfg.Storage.Delete(ctx, StorageKeys.SiteMeta(issuerKey, domain))
-	if err != nil {
-		return fmt.Errorf("deleting metadata file: %v", err)
-	}
-	err = cfg.Storage.Delete(ctx, StorageKeys.CertsSitePrefix(issuerKey, domain))
-	if err != nil {
-		return fmt.Errorf("deleting site asset folder: %v", err)
-	}
-	return nil
+	certStore := NewCertStore(cfg.Storage, cfg.Logger)
+	return certStore.Delete(ctx, issuerKey, domain)
 }
 
 // lockKey returns a key for a lock that is specific to the operation

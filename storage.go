@@ -250,6 +250,14 @@ func (keys KeyBuilder) SiteMeta(issuerKey, domain string) string {
 	return path.Join(keys.CertsSitePrefix(issuerKey, domain), safeDomain+".json")
 }
 
+// SiteBundle returns the path to the certificate bundle file for domain
+// that is associated with the issuer with the given issuerKey. The bundle
+// format combines certificate, private key, and metadata into a single file.
+func (keys KeyBuilder) SiteBundle(issuerKey, domain string) string {
+	safeDomain := keys.Safe(domain)
+	return path.Join(keys.CertsPrefix(issuerKey), safeDomain+".bundle.json")
+}
+
 // OCSPStaple returns a key for the OCSP staple associated
 // with the given certificate. If you have the PEM bundle
 // handy, pass that in to save an extra encoding step.

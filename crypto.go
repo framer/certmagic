@@ -24,7 +24,6 @@ import (
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -36,7 +35,6 @@ import (
 	"github.com/klauspost/cpuid/v2"
 	"github.com/zeebo/blake3"
 	"go.uber.org/zap"
-	"golang.org/x/net/idna"
 )
 
 // PEMEncodePrivateKey marshals a private key into a PEM-encoded block.
@@ -140,34 +138,11 @@ func fastHash(input []byte) string {
 	return fmt.Sprintf("%x", h.Sum32())
 }
 
-// saveCertResource saves the certificate resource to disk. This
-// includes the certificate file itself, the private key, and the
-// metadata file.
+// saveCertResource saves the certificate resource to disk as a single
+// bundle file containing the certificate, private key, and metadata.
 func (cfg *Config) saveCertResource(ctx context.Context, issuer Issuer, cert CertificateResource) error {
-	metaBytes, err := json.MarshalIndent(cert, "", "\t")
-	if err != nil {
-		return fmt.Errorf("encoding certificate metadata: %v", err)
-	}
-
-	issuerKey := issuer.IssuerKey()
-	certKey := cert.NamesKey()
-
-	all := []keyValue{
-		{
-			key:   StorageKeys.SitePrivateKey(issuerKey, certKey),
-			value: cert.PrivateKeyPEM,
-		},
-		{
-			key:   StorageKeys.SiteCert(issuerKey, certKey),
-			value: cert.CertificatePEM,
-		},
-		{
-			key:   StorageKeys.SiteMeta(issuerKey, certKey),
-			value: metaBytes,
-		},
-	}
-
-	return storeTx(ctx, cfg.Storage, all)
+	certStore := NewCertStore(cfg.Storage, cfg.Logger)
+	return certStore.Save(ctx, issuer.IssuerKey(), cert)
 }
 
 // loadCertResourceAnyIssuer loads and returns the certificate resource from any
@@ -175,11 +150,13 @@ func (cfg *Config) saveCertResource(ctx context.Context, issuer Issuer, cert Cer
 // configured, and all 3 have a resource matching certNamesKey), then the newest
 // (latest NotBefore date) resource will be chosen.
 func (cfg *Config) loadCertResourceAnyIssuer(ctx context.Context, certNamesKey string) (CertificateResource, error) {
+	certStore := NewCertStore(cfg.Storage, cfg.Logger)
+
 	// we can save some extra decoding steps if there's only one issuer, since
 	// we don't need to compare potentially multiple available resources to
 	// select the best one, when there's only one choice anyway
 	if len(cfg.Issuers) == 1 {
-		return cfg.loadCertResource(ctx, cfg.Issuers[0], certNamesKey)
+		return certStore.Load(ctx, cfg.Issuers[0].IssuerKey(), certNamesKey)
 	}
 
 	type decodedCertResource struct {
@@ -193,7 +170,7 @@ func (cfg *Config) loadCertResourceAnyIssuer(ctx context.Context, certNamesKey s
 	// load and decode all certificate resources found with the
 	// configured issuers so we can sort by newest
 	for _, issuer := range cfg.Issuers {
-		certRes, err := cfg.loadCertResource(ctx, issuer, certNamesKey)
+		certRes, err := certStore.Load(ctx, issuer.IssuerKey(), certNamesKey)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				// not a problem, but we need to remember the error
@@ -238,34 +215,8 @@ func (cfg *Config) loadCertResourceAnyIssuer(ctx context.Context, certNamesKey s
 
 // loadCertResource loads a certificate resource from the given issuer's storage location.
 func (cfg *Config) loadCertResource(ctx context.Context, issuer Issuer, certNamesKey string) (CertificateResource, error) {
-	certRes := CertificateResource{issuerKey: issuer.IssuerKey()}
-
-	// don't use the Lookup profile because we might be loading a wildcard cert which is rejected by the Lookup profile
-	normalizedName, err := idna.ToASCII(certNamesKey)
-	if err != nil {
-		return CertificateResource{}, fmt.Errorf("converting '%s' to ASCII: %v", certNamesKey, err)
-	}
-
-	keyBytes, err := cfg.Storage.Load(ctx, StorageKeys.SitePrivateKey(certRes.issuerKey, normalizedName))
-	if err != nil {
-		return CertificateResource{}, err
-	}
-	certRes.PrivateKeyPEM = keyBytes
-	certBytes, err := cfg.Storage.Load(ctx, StorageKeys.SiteCert(certRes.issuerKey, normalizedName))
-	if err != nil {
-		return CertificateResource{}, err
-	}
-	certRes.CertificatePEM = certBytes
-	metaBytes, err := cfg.Storage.Load(ctx, StorageKeys.SiteMeta(certRes.issuerKey, normalizedName))
-	if err != nil {
-		return CertificateResource{}, err
-	}
-	err = json.Unmarshal(metaBytes, &certRes)
-	if err != nil {
-		return CertificateResource{}, fmt.Errorf("decoding certificate metadata: %v", err)
-	}
-
-	return certRes, nil
+	certStore := NewCertStore(cfg.Storage, cfg.Logger)
+	return certStore.Load(ctx, issuer.IssuerKey(), certNamesKey)
 }
 
 // hashCertificateChain computes the unique hash of certChain,

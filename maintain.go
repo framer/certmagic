@@ -428,16 +428,12 @@ func (cfg *Config) storageHasNewerARI(ctx context.Context, cert Certificate) (bo
 }
 
 // loadStoredACMECertificateMetadata loads the stored ACME certificate data
-// from the cert's sidecar JSON file.
+// from the certificate bundle or legacy sidecar JSON file.
 func (cfg *Config) loadStoredACMECertificateMetadata(ctx context.Context, cert Certificate) (acme.Certificate, error) {
-	metaBytes, err := cfg.Storage.Load(ctx, StorageKeys.SiteMeta(cert.issuerKey, cert.Names[0]))
+	certStore := NewCertStore(cfg.Storage, cfg.Logger)
+	certRes, err := certStore.Load(ctx, cert.issuerKey, cert.Names[0])
 	if err != nil {
 		return acme.Certificate{}, fmt.Errorf("loading cert metadata: %w", err)
-	}
-
-	var certRes CertificateResource
-	if err = json.Unmarshal(metaBytes, &certRes); err != nil {
-		return acme.Certificate{}, fmt.Errorf("unmarshaling cert metadata: %w", err)
 	}
 
 	var acmeCert acme.Certificate
@@ -583,29 +579,19 @@ func (cfg *Config) updateARI(ctx context.Context, cert Certificate, logger *zap.
 			cfg.certCache.cache[cert.hash] = updatedCert
 			cfg.certCache.mu.Unlock()
 
-			// update the ARI value in storage
-			var certData acme.Certificate
-			certData, err = cfg.loadStoredACMECertificateMetadata(ctx, cert)
+			// update the ARI value in storage using atomic metadata update
+			certStore := NewCertStore(cfg.Storage, cfg.Logger)
+			err = certStore.UpdateMetadata(ctx, cert.issuerKey, cert.Names[0], func(current json.RawMessage) (json.RawMessage, error) {
+				var certData acme.Certificate
+				if len(current) > 0 {
+					if jsonErr := json.Unmarshal(current, &certData); jsonErr != nil {
+						return nil, fmt.Errorf("unmarshaling current metadata: %v", jsonErr)
+					}
+				}
+				certData.RenewalInfo = &newARI
+				return json.Marshal(certData)
+			})
 			if err != nil {
-				err = fmt.Errorf("got new ARI from %s, but failed loading stored certificate metadata: %v", iss.IssuerKey(), err)
-				return
-			}
-			certData.RenewalInfo = &newARI
-			var certDataBytes, certResBytes []byte
-			certDataBytes, err = json.Marshal(certData)
-			if err != nil {
-				err = fmt.Errorf("got new ARI from %s, but failed marshaling certificate ACME metadata: %v", iss.IssuerKey(), err)
-				return
-			}
-			certResBytes, err = json.MarshalIndent(CertificateResource{
-				SANs:       cert.Names,
-				IssuerData: certDataBytes,
-			}, "", "\t")
-			if err != nil {
-				err = fmt.Errorf("got new ARI from %s, but could not re-encode certificate metadata: %v", iss.IssuerKey(), err)
-				return
-			}
-			if err = cfg.Storage.Store(ctx, StorageKeys.SiteMeta(cert.issuerKey, cert.Names[0]), certResBytes); err != nil {
 				err = fmt.Errorf("got new ARI from %s, but could not store it with certificate metadata: %v", iss.IssuerKey(), err)
 				return
 			}
@@ -780,14 +766,19 @@ func deleteExpiredCerts(ctx context.Context, storage Storage, logger *zap.Logger
 		return nil
 	}
 
+	certStore := NewCertStore(storage, logger)
+
 	for _, issuerKey := range issuerKeys {
-		siteKeys, err := storage.List(ctx, issuerKey, false)
+		// Extract issuer name from path (e.g., "certificates/acme-v02.api.letsencrypt.org-directory" -> "acme-v02.api.letsencrypt.org-directory")
+		issuerName := path.Base(issuerKey)
+
+		contents, err := storage.List(ctx, issuerKey, false)
 		if err != nil {
 			logger.Error("listing contents", zap.String("issuer_key", issuerKey), zap.Error(err))
 			continue
 		}
 
-		for _, siteKey := range siteKeys {
+		for _, itemKey := range contents {
 			// if context was cancelled, quit early; otherwise proceed
 			select {
 			case <-ctx.Done():
@@ -795,9 +786,46 @@ func deleteExpiredCerts(ctx context.Context, storage Storage, logger *zap.Logger
 			default:
 			}
 
-			siteAssets, err := storage.List(ctx, siteKey, false)
+			// Handle new bundle format (.bundle.json files directly under issuer)
+			if strings.HasSuffix(itemKey, ".bundle.json") {
+				bundleData, err := storage.Load(ctx, itemKey)
+				if err != nil {
+					logger.Error("loading bundle file", zap.String("key", itemKey), zap.Error(err))
+					continue
+				}
+
+				var bundle CertificateBundle
+				if err := json.Unmarshal(bundleData, &bundle); err != nil {
+					logger.Error("parsing bundle file", zap.String("key", itemKey), zap.Error(err))
+					continue
+				}
+
+				certs, err := parseCertsFromPEMBundle(bundle.CertificatePEM)
+				if err != nil || len(certs) == 0 {
+					logger.Error("parsing certificate from bundle", zap.String("key", itemKey), zap.Error(err))
+					continue
+				}
+
+				if expiredTime := time.Since(expiresAt(certs[0])); expiredTime >= gracePeriod {
+					domain := strings.TrimSuffix(path.Base(itemKey), ".bundle.json")
+					logger.Info("certificate bundle expired beyond grace period; cleaning up",
+						zap.String("domain", domain),
+						zap.Duration("expired_for", expiredTime),
+						zap.Duration("grace_period", gracePeriod))
+
+					if err := certStore.Delete(ctx, issuerName, domain); err != nil {
+						logger.Error("could not delete expired certificate bundle",
+							zap.String("domain", domain),
+							zap.Error(err))
+					}
+				}
+				continue
+			}
+
+			// Handle legacy format (site folders containing .crt, .key, .json)
+			siteAssets, err := storage.List(ctx, itemKey, false)
 			if err != nil {
-				logger.Error("listing site contents", zap.String("site_key", siteKey), zap.Error(err))
+				// Not a directory, skip
 				continue
 			}
 
@@ -808,15 +836,18 @@ func deleteExpiredCerts(ctx context.Context, storage Storage, logger *zap.Logger
 
 				certFile, err := storage.Load(ctx, assetKey)
 				if err != nil {
-					return fmt.Errorf("loading certificate file %s: %v", assetKey, err)
+					logger.Error("loading certificate file", zap.String("key", assetKey), zap.Error(err))
+					continue
 				}
 				block, _ := pem.Decode(certFile)
 				if block == nil || block.Type != "CERTIFICATE" {
-					return fmt.Errorf("certificate file %s does not contain PEM-encoded certificate", assetKey)
+					logger.Error("certificate file does not contain PEM-encoded certificate", zap.String("key", assetKey))
+					continue
 				}
 				cert, err := x509.ParseCertificate(block.Bytes)
 				if err != nil {
-					return fmt.Errorf("certificate file %s is malformed; error parsing PEM: %v", assetKey, err)
+					logger.Error("certificate file is malformed", zap.String("key", assetKey), zap.Error(err))
+					continue
 				}
 
 				if expiredTime := time.Since(expiresAt(cert)); expiredTime >= gracePeriod {
@@ -843,15 +874,15 @@ func deleteExpiredCerts(ctx context.Context, storage Storage, logger *zap.Logger
 			}
 
 			// update listing; if folder is empty, delete it
-			siteAssets, err = storage.List(ctx, siteKey, false)
+			siteAssets, err = storage.List(ctx, itemKey, false)
 			if err != nil {
 				continue
 			}
 			if len(siteAssets) == 0 {
-				logger.Info("deleting site folder because key is empty", zap.String("site_key", siteKey))
-				err := storage.Delete(ctx, siteKey)
+				logger.Info("deleting site folder because key is empty", zap.String("site_key", itemKey))
+				err := storage.Delete(ctx, itemKey)
 				if err != nil {
-					return fmt.Errorf("deleting empty site folder %s: %v", siteKey, err)
+					logger.Error("deleting empty site folder", zap.String("key", itemKey), zap.Error(err))
 				}
 			}
 		}
@@ -919,34 +950,10 @@ func (cfg *Config) forceRenew(ctx context.Context, logger *zap.Logger, cert Cert
 }
 
 // moveCompromisedPrivateKey moves the private key for cert to a ".compromised" file
-// by copying the data to the new file, then deleting the old one.
+// by copying the data to the new file, then deleting the certificate.
 func (cfg *Config) moveCompromisedPrivateKey(ctx context.Context, cert Certificate, logger *zap.Logger) error {
-	privKeyStorageKey := StorageKeys.SitePrivateKey(cert.issuerKey, cert.Names[0])
-
-	privKeyPEM, err := cfg.Storage.Load(ctx, privKeyStorageKey)
-	if err != nil {
-		return err
-	}
-
-	compromisedPrivKeyStorageKey := privKeyStorageKey + ".compromised"
-	err = cfg.Storage.Store(ctx, compromisedPrivKeyStorageKey, privKeyPEM)
-	if err != nil {
-		// better safe than sorry: as a last resort, try deleting the key so it won't be reused
-		cfg.Storage.Delete(ctx, privKeyStorageKey)
-		return err
-	}
-
-	err = cfg.Storage.Delete(ctx, privKeyStorageKey)
-	if err != nil {
-		return err
-	}
-
-	logger.Info("removed certificate's compromised private key from use",
-		zap.String("storage_path", compromisedPrivKeyStorageKey),
-		zap.Strings("identifiers", cert.Names),
-		zap.String("issuer", cert.issuerKey))
-
-	return nil
+	certStore := NewCertStore(cfg.Storage, cfg.Logger)
+	return certStore.MoveCompromisedKey(ctx, cert.issuerKey, cert.Names[0])
 }
 
 // certShouldBeForceRenewed returns true if cert should be forcefully renewed
