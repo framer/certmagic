@@ -1007,6 +1007,21 @@ func deleteOldOCSPStaples(ctx context.Context, storage Storage, logger *zap.Logg
 }
 
 func deleteExpiredCerts(ctx context.Context, storage Storage, logger *zap.Logger, gracePeriod time.Duration) error {
+	switch os.Getenv(StorageModeEnv) {
+	case StorageModeTransition:
+		if err := deleteExpiredCertsBundle(ctx, storage, logger, gracePeriod); err != nil {
+			logger.Warn("unable to delete expired certs from bundle",
+				zap.Error(err))
+		}
+		return deleteExpiredCertsLegacy(ctx, storage, logger, gracePeriod)
+	case StorageModeBundle:
+		return deleteExpiredCertsBundle(ctx, storage, logger, gracePeriod)
+	default:
+		return deleteExpiredCertsLegacy(ctx, storage, logger, gracePeriod)
+	}
+}
+
+func deleteExpiredCertsLegacy(ctx context.Context, storage Storage, logger *zap.Logger, gracePeriod time.Duration) error {
 	issuerKeys, err := storage.List(ctx, prefixCerts, false)
 	if err != nil {
 		// maybe just hasn't been created yet; no big deal
@@ -1071,6 +1086,88 @@ func deleteExpiredCerts(ctx context.Context, storage Storage, logger *zap.Logger
 								zap.String("related_asset", relatedAsset),
 								zap.Error(err))
 						}
+					}
+				}
+			}
+
+			// update listing; if folder is empty, delete it
+			siteAssets, err = storage.List(ctx, siteKey, false)
+			if err != nil {
+				continue
+			}
+			if len(siteAssets) == 0 {
+				logger.Info("deleting site folder because key is empty", zap.String("site_key", siteKey))
+				err := storage.Delete(ctx, siteKey)
+				if err != nil {
+					return fmt.Errorf("deleting empty site folder %s: %v", siteKey, err)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func deleteExpiredCertsBundle(ctx context.Context, storage Storage, logger *zap.Logger, gracePeriod time.Duration) error {
+	issuerKeys, err := storage.List(ctx, prefixCerts, false)
+	if err != nil {
+		// maybe just hasn't been created yet; no big deal
+		return nil
+	}
+
+	for _, issuerKey := range issuerKeys {
+		siteKeys, err := storage.List(ctx, issuerKey, false)
+		if err != nil {
+			logger.Error("listing contents", zap.String("issuer_key", issuerKey), zap.Error(err))
+			continue
+		}
+
+		for _, siteKey := range siteKeys {
+			// if context was cancelled, quit early; otherwise proceed
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
+			siteAssets, err := storage.List(ctx, siteKey, false)
+			if err != nil {
+				logger.Error("listing site contents", zap.String("site_key", siteKey), zap.Error(err))
+				continue
+			}
+
+			for _, assetKey := range siteAssets {
+				if path.Ext(assetKey) != ".bundle" {
+					continue
+				}
+
+				bundleFile, err := storage.Load(ctx, assetKey)
+				if err != nil {
+					return fmt.Errorf("loading certificate bundle %s: %v", assetKey, err)
+				}
+				certRes, err := decodeCertResource(bundleFile)
+				if err != nil {
+					return fmt.Errorf("decoding certificate bundle %s: %v", assetKey, err)
+				}
+				block, _ := pem.Decode(certRes.CertificatePEM)
+				if block == nil || block.Type != "CERTIFICATE" {
+					return fmt.Errorf("certificate bundle %s does not contain PEM-encoded certificate", assetKey)
+				}
+				cert, err := x509.ParseCertificate(block.Bytes)
+				if err != nil {
+					return fmt.Errorf("certificate bundle %s is malformed; error parsing PEM: %v", assetKey, err)
+				}
+
+				if expiredTime := time.Since(expiresAt(cert)); expiredTime >= gracePeriod {
+					logger.Info("certificate expired beyond grace period; cleaning up",
+						zap.String("asset_key", assetKey),
+						zap.Duration("expired_for", expiredTime),
+						zap.Duration("grace_period", gracePeriod))
+					logger.Info("deleting asset because resource expired", zap.String("asset_key", assetKey))
+					err := storage.Delete(ctx, assetKey)
+					if err != nil {
+						logger.Error("could not clean up expired certificate bundle",
+							zap.String("asset_key", assetKey),
+							zap.Error(err))
 					}
 				}
 			}
