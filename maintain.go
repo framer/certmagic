@@ -1276,14 +1276,20 @@ func (cfg *Config) moveCompromisedPrivateKey(ctx context.Context, cert Certifica
 		return err
 	}
 
-	// in legacy/transition mode, delete the separate private key file
-	// in bundle mode, there's no separate file (key is inside bundle which will be replaced)
 	privKeyStorageKey := StorageKeys.SitePrivateKey(cert.issuerKey, cert.Names[0])
-	if cfg.Storage.Exists(ctx, privKeyStorageKey) {
-		err = cfg.Storage.Delete(ctx, privKeyStorageKey)
-		if err != nil {
-			return err
-		}
+	bundleKey := StorageKeys.SiteBundle(cert.issuerKey, cert.Names[0])
+
+	// Delete the storage containing the compromised key based on storage mode.
+	// We intentionally ignore delete errors since the file might not exist,
+	// and we avoid calling .Exists() before .Delete() to minimize storage roundtrips.
+	switch os.Getenv(StorageModeEnv) {
+	case StorageModeTransition:
+		cfg.Storage.Delete(ctx, bundleKey)
+		cfg.Storage.Delete(ctx, privKeyStorageKey)
+	case StorageModeBundle:
+		cfg.Storage.Delete(ctx, bundleKey)
+	default:
+		cfg.Storage.Delete(ctx, privKeyStorageKey)
 	}
 
 	logger.Info("removed certificate's compromised private key from use",
