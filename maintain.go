@@ -496,18 +496,55 @@ func (cfg *Config) loadStoredACMECertificateMetadataBundle(ctx context.Context, 
 func (cfg *Config) updateARI(ctx context.Context, cert Certificate, logger *zap.Logger) (updatedCert Certificate, changed bool, err error) {
 	switch os.Getenv(StorageModeEnv) {
 	case StorageModeTransition:
-		if updatedCert, changed, err = cfg.updateARIBundle(ctx, cert, logger); err != nil {
-			cfg.Logger.Warn("unable to update ARI in bundle",
-				zap.Strings("identifiers", cert.Names),
-				zap.String("issuer", cert.issuerKey),
-				zap.Error(err))
+		updatedCert, changed, err = cfg.updateARILegacy(ctx, cert, logger)
+		if err == nil {
+			// Also update bundle storage with the new ARI
+			if bundleErr := cfg.storeARIToBundle(ctx, updatedCert); bundleErr != nil {
+				cfg.Logger.Warn("unable to update ARI in bundle",
+					zap.Strings("identifiers", cert.Names),
+					zap.String("issuer", cert.issuerKey),
+					zap.Error(bundleErr))
+			}
 		}
-		return cfg.updateARILegacy(ctx, cert, logger)
+		return updatedCert, changed, err
 	case StorageModeBundle:
 		return cfg.updateARIBundle(ctx, cert, logger)
 	default:
 		return cfg.updateARILegacy(ctx, cert, logger)
 	}
+}
+
+// storeARIToBundle updates the ARI in the bundle storage without fetching from CA.
+// Note: This function only exists for transition mode to minimize CA requests.
+// In transition mode, we use updateARILegacy as the source of truth (which fetches
+// from CA if needed), then call this function to also update the bundle storage.
+func (cfg *Config) storeARIToBundle(ctx context.Context, cert Certificate) error {
+	bundleBytes, err := cfg.Storage.Load(ctx, StorageKeys.SiteBundle(cert.issuerKey, cert.Names[0]))
+	if err != nil {
+		return fmt.Errorf("loading certificate bundle: %v", err)
+	}
+	certRes, err := decodeCertResource(bundleBytes)
+	if err != nil {
+		return fmt.Errorf("decoding certificate bundle: %v", err)
+	}
+	var certData acme.Certificate
+	if err = json.Unmarshal(certRes.IssuerData, &certData); err != nil {
+		return fmt.Errorf("unmarshaling ACME issuer metadata: %v", err)
+	}
+	certData.RenewalInfo = &cert.ari
+	certDataBytes, err := json.Marshal(certData)
+	if err != nil {
+		return fmt.Errorf("marshaling certificate ACME metadata: %v", err)
+	}
+	certRes.IssuerData = certDataBytes
+	encoded, err := encodeCertResource(certRes)
+	if err != nil {
+		return fmt.Errorf("encoding certificate bundle: %v", err)
+	}
+	if err = cfg.Storage.Store(ctx, StorageKeys.SiteBundle(cert.issuerKey, cert.Names[0]), encoded); err != nil {
+		return fmt.Errorf("storing certificate bundle: %v", err)
+	}
+	return nil
 }
 
 // updateARILegacy updates the cert's ACME renewal info using the legacy storage format.
