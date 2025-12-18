@@ -250,6 +250,14 @@ func (keys KeyBuilder) SiteMeta(issuerKey, domain string) string {
 	return path.Join(keys.CertsSitePrefix(issuerKey, domain), safeDomain+".json")
 }
 
+// SiteBundle returns the path to the resource file for domain that
+// is associated with the certificate from the given issuer with
+// the given issuerKey.
+func (keys KeyBuilder) SiteBundle(issuerKey, domain string) string {
+	safeDomain := keys.Safe(domain)
+	return path.Join(keys.CertsSitePrefix(issuerKey, domain), safeDomain+".bundle")
+}
+
 // OCSPStaple returns a key for the OCSP staple associated
 // with the given certificate. If you have the PEM bundle
 // handy, pass that in to save an extra encoding step.
@@ -342,8 +350,10 @@ func releaseLock(ctx context.Context, storage Storage, lockKey string) error {
 
 // locks stores a reference to all the current
 // locks obtained by this process.
-var locks = make(map[string]Storage)
-var locksMu sync.Mutex
+var (
+	locks   = make(map[string]Storage)
+	locksMu sync.Mutex
+)
 
 // StorageKeys provides methods for accessing
 // keys and key prefixes for items in a Storage.

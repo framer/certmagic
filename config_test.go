@@ -28,7 +28,7 @@ import (
 )
 
 func TestSaveCertResource(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	am := &ACMEIssuer{CA: "https://example.com/acme/directory"}
 	testConfig := &Config{
@@ -153,4 +153,158 @@ func mustJSON(val any) []byte {
 		panic("marshaling JSON: " + err.Error())
 	}
 	return result
+}
+
+// testStorageModeSetup creates a test config with the specified storage mode
+func testStorageModeSetup(t *testing.T, mode, storagePath string) (*Config, *ACMEIssuer) {
+	t.Helper()
+	t.Setenv(StorageModeEnv, mode)
+
+	am := &ACMEIssuer{CA: "https://example.com/acme/directory"}
+	cfg := &Config{
+		Issuers:   []Issuer{am},
+		Storage:   &FileStorage{Path: storagePath},
+		Logger:    defaultTestLogger,
+		certCache: new(Cache),
+	}
+	am.config = cfg
+
+	t.Cleanup(func() {
+		os.RemoveAll(storagePath)
+	})
+
+	return cfg, am
+}
+
+func makeCertResource(am *ACMEIssuer, domain string, useLegacyContent bool) CertificateResource {
+	return CertificateResource{
+		SANs:           []string{domain},
+		PrivateKeyPEM:  []byte("private key"),
+		CertificatePEM: []byte("certificate"),
+		IssuerData:     mustJSON(acme.Certificate{URL: "https://example.com/cert"}),
+		issuerKey:      am.IssuerKey(),
+	}
+}
+
+func assertFileExists(t *testing.T, ctx context.Context, storage Storage, path string) {
+	t.Helper()
+	if !storage.Exists(ctx, path) {
+		t.Errorf("Expected file to exist at %s", path)
+	}
+}
+
+func assertFileNotExists(t *testing.T, ctx context.Context, storage Storage, path string) {
+	t.Helper()
+	if storage.Exists(ctx, path) {
+		t.Errorf("Expected file NOT to exist at %s", path)
+	}
+}
+
+func assertCertResourceContent(t *testing.T, loaded CertificateResource, expectedKey, expectedCert string) {
+	t.Helper()
+	if string(loaded.PrivateKeyPEM) != expectedKey {
+		t.Errorf("Private key mismatch: expected %q, got %q", expectedKey, string(loaded.PrivateKeyPEM))
+	}
+	if string(loaded.CertificatePEM) != expectedCert {
+		t.Errorf("Certificate mismatch: expected %q, got %q", expectedCert, string(loaded.CertificatePEM))
+	}
+}
+
+func TestStorageModeLegacy(t *testing.T) {
+	ctx := t.Context()
+	cfg, am := testStorageModeSetup(t, StorageModeLegacy, "./_testdata_tmp_legacy")
+
+	domain := "example.com"
+	cert := makeCertResource(am, domain, true)
+
+	if err := cfg.saveCertResource(ctx, am, cert); err != nil {
+		t.Fatalf("Failed to save cert resource: %v", err)
+	}
+
+	issuerKey := am.IssuerKey()
+	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SitePrivateKey(issuerKey, domain))
+	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SiteCert(issuerKey, domain))
+	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SiteMeta(issuerKey, domain))
+	assertFileNotExists(t, ctx, cfg.Storage, StorageKeys.SiteBundle(issuerKey, domain))
+
+	loaded, err := cfg.loadCertResource(ctx, am, domain)
+	if err != nil {
+		t.Fatalf("Failed to load cert resource: %v", err)
+	}
+	assertCertResourceContent(t, loaded, "private key", "certificate")
+}
+
+func TestStorageModeBundle(t *testing.T) {
+	ctx := t.Context()
+	cfg, am := testStorageModeSetup(t, StorageModeBundle, "./_testdata_tmp_bundle")
+
+	domain := "example.com"
+	cert := makeCertResource(am, domain, false)
+
+	if err := cfg.saveCertResource(ctx, am, cert); err != nil {
+		t.Fatalf("Failed to save cert resource: %v", err)
+	}
+
+	issuerKey := am.IssuerKey()
+	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SiteBundle(issuerKey, domain))
+	assertFileNotExists(t, ctx, cfg.Storage, StorageKeys.SitePrivateKey(issuerKey, domain))
+	assertFileNotExists(t, ctx, cfg.Storage, StorageKeys.SiteCert(issuerKey, domain))
+	assertFileNotExists(t, ctx, cfg.Storage, StorageKeys.SiteMeta(issuerKey, domain))
+
+	loaded, err := cfg.loadCertResource(ctx, am, domain)
+	if err != nil {
+		t.Fatalf("Failed to load cert resource: %v", err)
+	}
+	assertCertResourceContent(t, loaded, "private key", "certificate")
+}
+
+func TestStorageModeTransition(t *testing.T) {
+	ctx := t.Context()
+	cfg, am := testStorageModeSetup(t, StorageModeTransition, "./_testdata_tmp_transition")
+
+	domain := "example.com"
+	cert := makeCertResource(am, domain, false)
+
+	if err := cfg.saveCertResource(ctx, am, cert); err != nil {
+		t.Fatalf("Failed to save cert resource: %v", err)
+	}
+
+	// Verify BOTH legacy and bundle files exist
+	issuerKey := am.IssuerKey()
+	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SitePrivateKey(issuerKey, domain))
+	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SiteCert(issuerKey, domain))
+	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SiteMeta(issuerKey, domain))
+	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SiteBundle(issuerKey, domain))
+
+	loaded, err := cfg.loadCertResource(ctx, am, domain)
+	if err != nil {
+		t.Fatalf("Failed to load cert resource: %v", err)
+	}
+	assertCertResourceContent(t, loaded, "private key", "certificate")
+}
+
+func TestStorageModeTransitionFallback(t *testing.T) {
+	ctx := t.Context()
+	cfg, am := testStorageModeSetup(t, StorageModeTransition, "./_testdata_tmp_transition_fallback")
+
+	domain := "example.com"
+	cert := makeCertResource(am, domain, true)
+
+	// Save in legacy mode to simulate existing data
+	os.Setenv(StorageModeEnv, StorageModeLegacy)
+	if err := cfg.saveCertResource(ctx, am, cert); err != nil {
+		t.Fatalf("Failed to save cert in legacy mode: %v", err)
+	}
+
+	issuerKey := am.IssuerKey()
+	assertFileExists(t, ctx, cfg.Storage, StorageKeys.SitePrivateKey(issuerKey, domain))
+	assertFileNotExists(t, ctx, cfg.Storage, StorageKeys.SiteBundle(issuerKey, domain))
+
+	// Switch to transition mode and verify fallback to legacy works
+	os.Setenv(StorageModeEnv, StorageModeTransition)
+	loaded, err := cfg.loadCertResource(ctx, am, domain)
+	if err != nil {
+		t.Fatalf("Failed to load cert in transition mode with fallback: %v", err)
+	}
+	assertCertResourceContent(t, loaded, "private key", "certificate")
 }

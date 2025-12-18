@@ -32,6 +32,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -752,8 +753,7 @@ func (cfg *Config) reusePrivateKey(ctx context.Context, domain string) (privKey 
 
 	for i, issuer := range issuers {
 		// see if this issuer location in storage has a private key for the domain
-		privateKeyStorageKey := StorageKeys.SitePrivateKey(issuer.IssuerKey(), domain)
-		privKeyPEM, err = cfg.Storage.Load(ctx, privateKeyStorageKey)
+		certRes, err := cfg.loadCertResource(ctx, issuer, domain)
 		if errors.Is(err, fs.ErrNotExist) {
 			err = nil // obviously, it's OK to not have a private key; so don't prevent obtaining a cert
 			continue
@@ -761,6 +761,7 @@ func (cfg *Config) reusePrivateKey(ctx context.Context, domain string) (privKey 
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("loading existing private key for reuse with issuer %s: %v", issuer.IssuerKey(), err)
 		}
+		privKeyPEM = certRes.PrivateKeyPEM
 
 		// we loaded a private key; try decoding it so we can use it
 		privKey, err = PEMDecodePrivateKey(privKeyPEM)
@@ -1101,7 +1102,8 @@ func (cfg *Config) RevokeCert(ctx context.Context, domain string, reason int, in
 			return err
 		}
 
-		if !cfg.Storage.Exists(ctx, StorageKeys.SitePrivateKey(issuerKey, domain)) {
+		// loadCertResource should already fail if private key is missing.
+		if len(certRes.PrivateKeyPEM) == 0 {
 			return fmt.Errorf("private key not found for %s", certRes.SANs)
 		}
 
@@ -1266,11 +1268,28 @@ func (cfg *Config) checkStorage(ctx context.Context) error {
 	return nil
 }
 
-// storageHasCertResources returns true if the storage
+// storageHasCertResources returns true if the storage associated with cfg's certificate cache has all the
+// resources related to the certificate for domain.
+// It switches storage modes between legacy and bundle mode based on the CERTMAGIC_STORAGE_MODE env.
+func (cfg *Config) storageHasCertResources(ctx context.Context, issuer Issuer, domain string) bool {
+	switch os.Getenv(StorageModeEnv) {
+	case StorageModeTransition:
+		if cfg.storageHasCertResourcesBundle(ctx, issuer, domain) {
+			return true
+		}
+		return cfg.storageHasCertResourcesLegacy(ctx, issuer, domain)
+	case StorageModeBundle:
+		return cfg.storageHasCertResourcesBundle(ctx, issuer, domain)
+	default:
+		return cfg.storageHasCertResourcesLegacy(ctx, issuer, domain)
+	}
+}
+
+// storageHasCertResourcesLegacy returns true if the storage
 // associated with cfg's certificate cache has all the
 // resources related to the certificate for domain: the
 // certificate, the private key, and the metadata.
-func (cfg *Config) storageHasCertResources(ctx context.Context, issuer Issuer, domain string) bool {
+func (cfg *Config) storageHasCertResourcesLegacy(ctx context.Context, issuer Issuer, domain string) bool {
 	issuerKey := issuer.IssuerKey()
 	certKey := StorageKeys.SiteCert(issuerKey, domain)
 	keyKey := StorageKeys.SitePrivateKey(issuerKey, domain)
@@ -1280,10 +1299,40 @@ func (cfg *Config) storageHasCertResources(ctx context.Context, issuer Issuer, d
 		cfg.Storage.Exists(ctx, metaKey)
 }
 
+// storageHasCertResourcesBundle returns true if the storage
+// associated with cfg's certificate cache has the
+// certificate resource bundle for domain.
+func (cfg *Config) storageHasCertResourcesBundle(ctx context.Context, issuer Issuer, domain string) bool {
+	issuerKey := issuer.IssuerKey()
+	certBundle := StorageKeys.SiteBundle(issuerKey, domain)
+	return cfg.Storage.Exists(ctx, certBundle)
+}
+
 // deleteSiteAssets deletes the folder in storage containing the
 // certificate, private key, and metadata file for domain from the
 // issuer with the given issuer key.
+// It switches storage modes between legacy and bundle mode based on the CERTMAGIC_STORAGE_MODE env.
 func (cfg *Config) deleteSiteAssets(ctx context.Context, issuerKey, domain string) error {
+	switch os.Getenv(StorageModeEnv) {
+	case StorageModeTransition:
+		if err := cfg.deleteSiteAssetsBundle(ctx, issuerKey, domain); err != nil {
+			cfg.Logger.Warn("unable to delete certificate resource bundle",
+				zap.String("issuer", issuerKey),
+				zap.String("domain", domain),
+				zap.Error(err))
+		}
+		return cfg.deleteSiteAssetsLegacy(ctx, issuerKey, domain)
+	case StorageModeBundle:
+		return cfg.deleteSiteAssetsBundle(ctx, issuerKey, domain)
+	default:
+		return cfg.deleteSiteAssetsLegacy(ctx, issuerKey, domain)
+	}
+}
+
+// deleteSiteAssetsLegacy deletes the folder in storage containing the
+// certificate, private key, and metadata file for domain from the
+// issuer with the given issuer key.
+func (cfg *Config) deleteSiteAssetsLegacy(ctx context.Context, issuerKey, domain string) error {
 	err := cfg.Storage.Delete(ctx, StorageKeys.SiteCert(issuerKey, domain))
 	if err != nil {
 		return fmt.Errorf("deleting certificate file: %v", err)
@@ -1299,6 +1348,16 @@ func (cfg *Config) deleteSiteAssets(ctx context.Context, issuerKey, domain strin
 	err = cfg.Storage.Delete(ctx, StorageKeys.CertsSitePrefix(issuerKey, domain))
 	if err != nil {
 		return fmt.Errorf("deleting site asset folder: %v", err)
+	}
+	return nil
+}
+
+// deleteSiteAssetsBundle deletes the folder in storage containing the
+// certificate bundle for domain from the issuer with the given issuer key.
+func (cfg *Config) deleteSiteAssetsBundle(ctx context.Context, issuerKey, domain string) error {
+	err := cfg.Storage.Delete(ctx, StorageKeys.SiteBundle(issuerKey, domain))
+	if err != nil {
+		return fmt.Errorf("deleting certificate bundle: %v", err)
 	}
 	return nil
 }

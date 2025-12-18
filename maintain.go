@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path"
 	"runtime"
 	"strings"
@@ -427,9 +428,26 @@ func (cfg *Config) storageHasNewerARI(ctx context.Context, cert Certificate) (bo
 	return false, acme.RenewalInfo{}, nil
 }
 
-// loadStoredACMECertificateMetadata loads the stored ACME certificate data
-// from the cert's sidecar JSON file.
+// loadStoredACMECertificateMetadata loads the stored ACME certificate data.
+// It switches storage modes between legacy and bundle mode based on the CERTMAGIC_STORAGE_MODE env.
 func (cfg *Config) loadStoredACMECertificateMetadata(ctx context.Context, cert Certificate) (acme.Certificate, error) {
+	switch os.Getenv(StorageModeEnv) {
+	case StorageModeTransition:
+		acmecert, err := cfg.loadStoredACMECertificateMetadataBundle(ctx, cert)
+		if err == nil {
+			return acmecert, nil
+		}
+		return cfg.loadStoredACMECertificateMetadataLegacy(ctx, cert)
+	case StorageModeBundle:
+		return cfg.loadStoredACMECertificateMetadataBundle(ctx, cert)
+	default:
+		return cfg.loadStoredACMECertificateMetadataLegacy(ctx, cert)
+	}
+}
+
+// loadStoredACMECertificateMetadataLegacy loads the stored ACME certificate data
+// from the cert's sidecar JSON file.
+func (cfg *Config) loadStoredACMECertificateMetadataLegacy(ctx context.Context, cert Certificate) (acme.Certificate, error) {
 	metaBytes, err := cfg.Storage.Load(ctx, StorageKeys.SiteMeta(cert.issuerKey, cert.Names[0]))
 	if err != nil {
 		return acme.Certificate{}, fmt.Errorf("loading cert metadata: %w", err)
@@ -437,6 +455,26 @@ func (cfg *Config) loadStoredACMECertificateMetadata(ctx context.Context, cert C
 
 	var certRes CertificateResource
 	if err = json.Unmarshal(metaBytes, &certRes); err != nil {
+		return acme.Certificate{}, fmt.Errorf("unmarshaling cert metadata: %w", err)
+	}
+
+	var acmeCert acme.Certificate
+	if err = json.Unmarshal(certRes.IssuerData, &acmeCert); err != nil {
+		return acme.Certificate{}, fmt.Errorf("unmarshaling potential ACME issuer metadata: %v", err)
+	}
+
+	return acmeCert, nil
+}
+
+// loadStoredACMECertificateMetadataBundle loads the stored ACME certificate data from the cert bundle.
+func (cfg *Config) loadStoredACMECertificateMetadataBundle(ctx context.Context, cert Certificate) (acme.Certificate, error) {
+	bundleBytes, err := cfg.Storage.Load(ctx, StorageKeys.SiteBundle(cert.issuerKey, cert.Names[0]))
+	if err != nil {
+		return acme.Certificate{}, fmt.Errorf("loading cert metadata: %w", err)
+	}
+
+	certRes, err := decodeCertResource(bundleBytes)
+	if err != nil {
 		return acme.Certificate{}, fmt.Errorf("unmarshaling cert metadata: %w", err)
 	}
 
@@ -456,7 +494,63 @@ func (cfg *Config) loadStoredACMECertificateMetadata(ctx context.Context, cert C
 //
 // This will always try to ARI without checking if it needs to be refreshed. Call
 // NeedsRefresh() on the RenewalInfo first, and only call this if that returns true.
+// It switches storage modes between legacy and bundle mode based on the CERTMAGIC_STORAGE_MODE env.
 func (cfg *Config) updateARI(ctx context.Context, cert Certificate, logger *zap.Logger) (updatedCert Certificate, changed bool, err error) {
+	switch os.Getenv(StorageModeEnv) {
+	case StorageModeTransition:
+		updatedCert, changed, err = cfg.updateARILegacy(ctx, cert, logger)
+		if err == nil {
+			// Also update bundle storage with the new ARI
+			if bundleErr := cfg.storeARIToBundle(ctx, updatedCert); bundleErr != nil {
+				cfg.Logger.Warn("unable to update ARI in bundle",
+					zap.Strings("identifiers", cert.Names),
+					zap.String("issuer", cert.issuerKey),
+					zap.Error(bundleErr))
+			}
+		}
+		return updatedCert, changed, err
+	case StorageModeBundle:
+		return cfg.updateARIBundle(ctx, cert, logger)
+	default:
+		return cfg.updateARILegacy(ctx, cert, logger)
+	}
+}
+
+// storeARIToBundle updates the ARI in the bundle storage without fetching from CA.
+// Note: This function only exists for transition mode to minimize CA requests.
+// In transition mode, we use updateARILegacy as the source of truth (which fetches
+// from CA if needed), then call this function to also update the bundle storage.
+func (cfg *Config) storeARIToBundle(ctx context.Context, cert Certificate) error {
+	bundleBytes, err := cfg.Storage.Load(ctx, StorageKeys.SiteBundle(cert.issuerKey, cert.Names[0]))
+	if err != nil {
+		return fmt.Errorf("loading certificate bundle: %v", err)
+	}
+	certRes, err := decodeCertResource(bundleBytes)
+	if err != nil {
+		return fmt.Errorf("decoding certificate bundle: %v", err)
+	}
+	var certData acme.Certificate
+	if err = json.Unmarshal(certRes.IssuerData, &certData); err != nil {
+		return fmt.Errorf("unmarshaling ACME issuer metadata: %v", err)
+	}
+	certData.RenewalInfo = &cert.ari
+	certDataBytes, err := json.Marshal(certData)
+	if err != nil {
+		return fmt.Errorf("marshaling certificate ACME metadata: %v", err)
+	}
+	certRes.IssuerData = certDataBytes
+	encoded, err := encodeCertResource(certRes)
+	if err != nil {
+		return fmt.Errorf("encoding certificate bundle: %v", err)
+	}
+	if err = cfg.Storage.Store(ctx, StorageKeys.SiteBundle(cert.issuerKey, cert.Names[0]), encoded); err != nil {
+		return fmt.Errorf("storing certificate bundle: %v", err)
+	}
+	return nil
+}
+
+// updateARILegacy updates the cert's ACME renewal info using the legacy storage format.
+func (cfg *Config) updateARILegacy(ctx context.Context, cert Certificate, logger *zap.Logger) (updatedCert Certificate, changed bool, err error) {
 	logger = logger.With(
 		zap.Strings("identifiers", cert.Names),
 		zap.String("cert_hash", cert.hash),
@@ -585,7 +679,7 @@ func (cfg *Config) updateARI(ctx context.Context, cert Certificate, logger *zap.
 
 			// update the ARI value in storage
 			var certData acme.Certificate
-			certData, err = cfg.loadStoredACMECertificateMetadata(ctx, cert)
+			certData, err = cfg.loadStoredACMECertificateMetadataLegacy(ctx, cert)
 			if err != nil {
 				err = fmt.Errorf("got new ARI from %s, but failed loading stored certificate metadata: %v", iss.IssuerKey(), err)
 				return
@@ -607,6 +701,184 @@ func (cfg *Config) updateARI(ctx context.Context, cert Certificate, logger *zap.
 			}
 			if err = cfg.Storage.Store(ctx, StorageKeys.SiteMeta(cert.issuerKey, cert.Names[0]), certResBytes); err != nil {
 				err = fmt.Errorf("got new ARI from %s, but could not store it with certificate metadata: %v", iss.IssuerKey(), err)
+				return
+			}
+
+			logger.Info("updated and stored ACME renewal information",
+				zap.Time("selected_time", newARI.SelectedTime),
+				zap.Timep("next_update", newARI.RetryAfter),
+				zap.String("explanation_url", newARI.ExplanationURL))
+
+			return
+		}
+	}
+
+	err = fmt.Errorf("could not fully update ACME renewal info: either no issuer supporting ARI is configured for certificate, or all such failed (make sure the ACME CA that issued the certificate is configured)")
+	return
+}
+
+// updateARIBundle updates the cert's ACME renewal info using the bundle storage format.
+func (cfg *Config) updateARIBundle(ctx context.Context, cert Certificate, logger *zap.Logger) (updatedCert Certificate, changed bool, err error) {
+	logger = logger.With(
+		zap.Strings("identifiers", cert.Names),
+		zap.String("cert_hash", cert.hash),
+		zap.String("ari_unique_id", cert.ari.UniqueIdentifier),
+		zap.Time("cert_expiry", cert.Leaf.NotAfter))
+
+	updatedCert = cert
+	oldARI := cert.ari
+
+	// synchronize ARI fetching; see #297
+	lockName := "ari_" + cert.ari.UniqueIdentifier
+	if _, ok := cfg.Storage.(TryLocker); ok {
+		ok, err := tryAcquireLock(ctx, cfg.Storage, lockName)
+		if err != nil {
+			return cert, false, fmt.Errorf("unable to obtain ARI lock: %v", err)
+		}
+		if !ok {
+			logger.Debug("attempted to obtain ARI lock but it was already taken")
+			return cert, false, nil
+		}
+	} else if err := acquireLock(ctx, cfg.Storage, lockName); err != nil {
+		return cert, false, fmt.Errorf("unable to obtain ARI lock: %v", err)
+	}
+	defer func() {
+		if err := releaseLock(ctx, cfg.Storage, lockName); err != nil {
+			logger.Error("unable to release ARI lock", zap.Error(err))
+		}
+	}()
+
+	// see if the stored value has been refreshed already by another instance
+	gotNewARI, newARI, err := cfg.storageHasNewerARI(ctx, cert)
+
+	// when we're all done, log if something about the schedule is different
+	// ("WARN" level because ARI window changing may be a sign of external trouble
+	// and we want to draw their attention to a potential explanation URL)
+	defer func() {
+		changed = !newARI.SameWindow(oldARI)
+
+		if changed {
+			logger.Warn("ARI window or selected renewal time changed",
+				zap.Time("prev_start", oldARI.SuggestedWindow.Start),
+				zap.Time("next_start", newARI.SuggestedWindow.Start),
+				zap.Time("prev_end", oldARI.SuggestedWindow.End),
+				zap.Time("next_end", newARI.SuggestedWindow.End),
+				zap.Time("prev_selected_time", oldARI.SelectedTime),
+				zap.Time("next_selected_time", newARI.SelectedTime),
+				zap.String("explanation_url", newARI.ExplanationURL))
+		}
+	}()
+
+	if err == nil && gotNewARI {
+		// great, storage has a newer one we can use
+		cfg.certCache.mu.Lock()
+		var ok bool
+		updatedCert, ok = cfg.certCache.cache[cert.hash]
+		if !ok {
+			// cert is no longer in the cache... why? what's the right thing to do here?
+			cfg.certCache.mu.Unlock()
+			updatedCert = cert       // return input cert, not an empty one
+			updatedCert.ari = newARI // might as well give it the new ARI for the benefit of our caller, but it won't be updated in the cache or in storage
+			logger.Warn("loaded newer ARI from storage, but certificate is no longer in cache; newer ARI will be returned to caller, but not persisted in the cache",
+				zap.Time("selected_time", newARI.SelectedTime),
+				zap.Timep("next_update", newARI.RetryAfter),
+				zap.String("explanation_url", newARI.ExplanationURL))
+			return
+		}
+		updatedCert.ari = newARI
+		cfg.certCache.cache[cert.hash] = updatedCert
+		cfg.certCache.mu.Unlock()
+		logger.Info("reloaded ARI with newer one in storage",
+			zap.Timep("next_refresh", newARI.RetryAfter),
+			zap.Time("renewal_time", newARI.SelectedTime))
+		return
+	}
+
+	if err != nil {
+		logger.Error("error while checking storage for updated ARI; updating ARI now", zap.Error(err))
+	}
+
+	// of the issuers configured, hopefully one of them is the ACME CA we got the cert from
+	for _, iss := range cfg.Issuers {
+		if ariGetter, ok := iss.(RenewalInfoGetter); ok && iss.IssuerKey() == cert.issuerKey {
+			newARI, err = ariGetter.GetRenewalInfo(ctx, cert) // be sure to use existing newARI variable so we can compare against old value in the defer
+			if err != nil {
+				// could be anything, but a common error might simply be the "wrong" ACME CA
+				// (meaning, different from the one that issued the cert, thus the only one
+				// that would have any ARI for it) if multiple ACME CAs are configured
+				logger.Error("failed updating renewal info from ACME CA",
+					zap.String("issuer", iss.IssuerKey()),
+					zap.Error(err))
+				continue
+			}
+
+			// when we get the latest ARI, the acme package will select a time within the window
+			// for us; of course, since it's random, it's likely different from the previously-
+			// selected time; but if the window doesn't change, there's no need to change the
+			// selected time (the acme package doesn't know the previous window to know better)
+			// ... so if the window hasn't changed we'll just put back the selected time
+			if newARI.SameWindow(oldARI) && !oldARI.SelectedTime.IsZero() {
+				newARI.SelectedTime = oldARI.SelectedTime
+			}
+
+			// then store the updated ARI (even if the window didn't change, the Retry-After
+			// likely did) in cache and storage
+
+			// be sure we get the cert from the cache while inside a lock to avoid logical races
+			cfg.certCache.mu.Lock()
+			updatedCert, ok = cfg.certCache.cache[cert.hash]
+			if !ok {
+				// cert is no longer in the cache; this can happen for several reasons (past expiration,
+				// rejected by on-demand permission module, random eviction due to full cache, etc), but
+				// it probably means we don't have use of this ARI update now, so while we can return it
+				// to the caller, we don't persist it anywhere beyond that...
+				cfg.certCache.mu.Unlock()
+				updatedCert = cert       // return input cert, not an empty one
+				updatedCert.ari = newARI // might as well give it the new ARI for the benefit of our caller, but it won't be updated in the cache or in storage
+				logger.Warn("obtained ARI update, but certificate no longer in cache; ARI update will be returned to caller, but not stored",
+					zap.Time("selected_time", newARI.SelectedTime),
+					zap.Timep("next_update", newARI.RetryAfter),
+					zap.String("explanation_url", newARI.ExplanationURL))
+				return
+			}
+			updatedCert.ari = newARI
+			cfg.certCache.cache[cert.hash] = updatedCert
+			cfg.certCache.mu.Unlock()
+
+			// update the ARI value in storage
+			var bundleBytes []byte
+			bundleBytes, err = cfg.Storage.Load(ctx, StorageKeys.SiteBundle(cert.issuerKey, cert.Names[0]))
+			if err != nil {
+				err = fmt.Errorf("got new ARI from %s, but failed loading certificate bundle: %v", iss.IssuerKey(), err)
+				return
+			}
+			var certRes CertificateResource
+			certRes, err = decodeCertResource(bundleBytes)
+			if err != nil {
+				err = fmt.Errorf("got new ARI from %s, but failed decoding certificate bundle: %v", iss.IssuerKey(), err)
+				return
+			}
+			var certData acme.Certificate
+			if err = json.Unmarshal(certRes.IssuerData, &certData); err != nil {
+				err = fmt.Errorf("got new ARI from %s, but failed unmarshaling ACME issuer metadata: %v", iss.IssuerKey(), err)
+				return
+			}
+			certData.RenewalInfo = &newARI
+			var certDataBytes []byte
+			certDataBytes, err = json.Marshal(certData)
+			if err != nil {
+				err = fmt.Errorf("got new ARI from %s, but failed marshaling certificate ACME metadata: %v", iss.IssuerKey(), err)
+				return
+			}
+			certRes.IssuerData = certDataBytes
+			var encoded []byte
+			encoded, err = encodeCertResource(certRes)
+			if err != nil {
+				err = fmt.Errorf("got new ARI from %s, but could not re-encode certificate bundle: %v", iss.IssuerKey(), err)
+				return
+			}
+			if err = cfg.Storage.Store(ctx, StorageKeys.SiteBundle(cert.issuerKey, cert.Names[0]), encoded); err != nil {
+				err = fmt.Errorf("got new ARI from %s, but could not store it with certificate bundle: %v", iss.IssuerKey(), err)
 				return
 			}
 
@@ -774,6 +1046,21 @@ func deleteOldOCSPStaples(ctx context.Context, storage Storage, logger *zap.Logg
 }
 
 func deleteExpiredCerts(ctx context.Context, storage Storage, logger *zap.Logger, gracePeriod time.Duration) error {
+	switch os.Getenv(StorageModeEnv) {
+	case StorageModeTransition:
+		if err := deleteExpiredCertsBundle(ctx, storage, logger, gracePeriod); err != nil {
+			logger.Warn("unable to delete expired certs from bundle",
+				zap.Error(err))
+		}
+		return deleteExpiredCertsLegacy(ctx, storage, logger, gracePeriod)
+	case StorageModeBundle:
+		return deleteExpiredCertsBundle(ctx, storage, logger, gracePeriod)
+	default:
+		return deleteExpiredCertsLegacy(ctx, storage, logger, gracePeriod)
+	}
+}
+
+func deleteExpiredCertsLegacy(ctx context.Context, storage Storage, logger *zap.Logger, gracePeriod time.Duration) error {
 	issuerKeys, err := storage.List(ctx, prefixCerts, false)
 	if err != nil {
 		// maybe just hasn't been created yet; no big deal
@@ -859,6 +1146,88 @@ func deleteExpiredCerts(ctx context.Context, storage Storage, logger *zap.Logger
 	return nil
 }
 
+func deleteExpiredCertsBundle(ctx context.Context, storage Storage, logger *zap.Logger, gracePeriod time.Duration) error {
+	issuerKeys, err := storage.List(ctx, prefixCerts, false)
+	if err != nil {
+		// maybe just hasn't been created yet; no big deal
+		return nil
+	}
+
+	for _, issuerKey := range issuerKeys {
+		siteKeys, err := storage.List(ctx, issuerKey, false)
+		if err != nil {
+			logger.Error("listing contents", zap.String("issuer_key", issuerKey), zap.Error(err))
+			continue
+		}
+
+		for _, siteKey := range siteKeys {
+			// if context was cancelled, quit early; otherwise proceed
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
+			siteAssets, err := storage.List(ctx, siteKey, false)
+			if err != nil {
+				logger.Error("listing site contents", zap.String("site_key", siteKey), zap.Error(err))
+				continue
+			}
+
+			for _, assetKey := range siteAssets {
+				if path.Ext(assetKey) != ".bundle" {
+					continue
+				}
+
+				bundleFile, err := storage.Load(ctx, assetKey)
+				if err != nil {
+					return fmt.Errorf("loading certificate bundle %s: %v", assetKey, err)
+				}
+				certRes, err := decodeCertResource(bundleFile)
+				if err != nil {
+					return fmt.Errorf("decoding certificate bundle %s: %v", assetKey, err)
+				}
+				block, _ := pem.Decode(certRes.CertificatePEM)
+				if block == nil || block.Type != "CERTIFICATE" {
+					return fmt.Errorf("certificate bundle %s does not contain PEM-encoded certificate", assetKey)
+				}
+				cert, err := x509.ParseCertificate(block.Bytes)
+				if err != nil {
+					return fmt.Errorf("certificate bundle %s is malformed; error parsing PEM: %v", assetKey, err)
+				}
+
+				if expiredTime := time.Since(expiresAt(cert)); expiredTime >= gracePeriod {
+					logger.Info("certificate expired beyond grace period; cleaning up",
+						zap.String("asset_key", assetKey),
+						zap.Duration("expired_for", expiredTime),
+						zap.Duration("grace_period", gracePeriod))
+					logger.Info("deleting asset because resource expired", zap.String("asset_key", assetKey))
+					err := storage.Delete(ctx, assetKey)
+					if err != nil {
+						logger.Error("could not clean up expired certificate bundle",
+							zap.String("asset_key", assetKey),
+							zap.Error(err))
+					}
+				}
+			}
+
+			// update listing; if folder is empty, delete it
+			siteAssets, err = storage.List(ctx, siteKey, false)
+			if err != nil {
+				continue
+			}
+			if len(siteAssets) == 0 {
+				logger.Info("deleting site folder because key is empty", zap.String("site_key", siteKey))
+				err := storage.Delete(ctx, siteKey)
+				if err != nil {
+					return fmt.Errorf("deleting empty site folder %s: %v", siteKey, err)
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // forceRenew forcefully renews cert and replaces it in the cache, and returns the new certificate. It is intended
 // for use primarily in the case of cert revocation. This MUST NOT be called within a lock on cfg.certCacheMu.
 func (cfg *Config) forceRenew(ctx context.Context, logger *zap.Logger, cert Certificate) (Certificate, error) {
@@ -921,24 +1290,45 @@ func (cfg *Config) forceRenew(ctx context.Context, logger *zap.Logger, cert Cert
 // moveCompromisedPrivateKey moves the private key for cert to a ".compromised" file
 // by copying the data to the new file, then deleting the old one.
 func (cfg *Config) moveCompromisedPrivateKey(ctx context.Context, cert Certificate, logger *zap.Logger) error {
+	// find the issuer that matches the cert's issuer key
+	var issuer Issuer
+	for _, iss := range cfg.Issuers {
+		if iss.IssuerKey() == cert.issuerKey {
+			issuer = iss
+			break
+		}
+	}
+	if issuer == nil {
+		return fmt.Errorf("no configured issuer matches certificate's issuer key: %s", cert.issuerKey)
+	}
+
+	// load cert resource to get private key (handles both legacy and bundle storage modes)
+	certRes, err := cfg.loadCertResource(ctx, issuer, cert.Names[0])
+	if err != nil {
+		return err
+	}
+
+	// store the compromised key for audit purposes
+	compromisedPrivKeyStorageKey := StorageKeys.SitePrivateKey(cert.issuerKey, cert.Names[0]) + ".compromised"
+	err = cfg.Storage.Store(ctx, compromisedPrivKeyStorageKey, certRes.PrivateKeyPEM)
+	if err != nil {
+		return err
+	}
+
 	privKeyStorageKey := StorageKeys.SitePrivateKey(cert.issuerKey, cert.Names[0])
+	bundleKey := StorageKeys.SiteBundle(cert.issuerKey, cert.Names[0])
 
-	privKeyPEM, err := cfg.Storage.Load(ctx, privKeyStorageKey)
-	if err != nil {
-		return err
-	}
-
-	compromisedPrivKeyStorageKey := privKeyStorageKey + ".compromised"
-	err = cfg.Storage.Store(ctx, compromisedPrivKeyStorageKey, privKeyPEM)
-	if err != nil {
-		// better safe than sorry: as a last resort, try deleting the key so it won't be reused
+	// Delete the storage containing the compromised key based on storage mode.
+	// We intentionally ignore delete errors since the file might not exist,
+	// and we avoid calling .Exists() before .Delete() to minimize storage roundtrips.
+	switch os.Getenv(StorageModeEnv) {
+	case StorageModeTransition:
+		cfg.Storage.Delete(ctx, bundleKey)
 		cfg.Storage.Delete(ctx, privKeyStorageKey)
-		return err
-	}
-
-	err = cfg.Storage.Delete(ctx, privKeyStorageKey)
-	if err != nil {
-		return err
+	case StorageModeBundle:
+		cfg.Storage.Delete(ctx, bundleKey)
+	default:
+		cfg.Storage.Delete(ctx, privKeyStorageKey)
 	}
 
 	logger.Info("removed certificate's compromised private key from use",
