@@ -28,7 +28,7 @@ import (
 )
 
 func TestSaveCertResource(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	am := &ACMEIssuer{CA: "https://example.com/acme/directory"}
 	testConfig := &Config{
@@ -211,7 +211,7 @@ func assertCertResourceContent(t *testing.T, loaded CertificateResource, expecte
 }
 
 func TestStorageModeLegacy(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	cfg, am := testStorageModeSetup(t, StorageModeLegacy, "./_testdata_tmp_legacy")
 
 	domain := "example.com"
@@ -235,7 +235,7 @@ func TestStorageModeLegacy(t *testing.T) {
 }
 
 func TestStorageModeBundle(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	cfg, am := testStorageModeSetup(t, StorageModeBundle, "./_testdata_tmp_bundle")
 
 	domain := "example.com"
@@ -259,7 +259,7 @@ func TestStorageModeBundle(t *testing.T) {
 }
 
 func TestStorageModeTransition(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	cfg, am := testStorageModeSetup(t, StorageModeTransition, "./_testdata_tmp_transition")
 
 	domain := "example.com"
@@ -284,7 +284,7 @@ func TestStorageModeTransition(t *testing.T) {
 }
 
 func TestStorageModeTransitionFallback(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	cfg, am := testStorageModeSetup(t, StorageModeTransition, "./_testdata_tmp_transition_fallback")
 
 	domain := "example.com"
