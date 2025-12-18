@@ -1268,9 +1268,9 @@ func (cfg *Config) checkStorage(ctx context.Context) error {
 	return nil
 }
 
-// storageHasCertResources returns true if the storage
-// associated with cfg's certificate cache has all the
+// storageHasCertResources returns true if the storage associated with cfg's certificate cache has all the
 // resources related to the certificate for domain.
+// It switches storage modes between legacy and bundle mode based on the CERTMAGIC_STORAGE_MODE env.
 func (cfg *Config) storageHasCertResources(ctx context.Context, issuer Issuer, domain string) bool {
 	switch os.Getenv(StorageModeEnv) {
 	case StorageModeTransition:
@@ -1311,6 +1311,7 @@ func (cfg *Config) storageHasCertResourcesBundle(ctx context.Context, issuer Iss
 // deleteSiteAssets deletes the folder in storage containing the
 // certificate, private key, and metadata file for domain from the
 // issuer with the given issuer key.
+// It switches storage modes between legacy and bundle mode based on the CERTMAGIC_STORAGE_MODE env.
 func (cfg *Config) deleteSiteAssets(ctx context.Context, issuerKey, domain string) error {
 	switch os.Getenv(StorageModeEnv) {
 	case StorageModeTransition:

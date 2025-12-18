@@ -429,6 +429,7 @@ func (cfg *Config) storageHasNewerARI(ctx context.Context, cert Certificate) (bo
 }
 
 // loadStoredACMECertificateMetadata loads the stored ACME certificate data.
+// It switches storage modes between legacy and bundle mode based on the CERTMAGIC_STORAGE_MODE env.
 func (cfg *Config) loadStoredACMECertificateMetadata(ctx context.Context, cert Certificate) (acme.Certificate, error) {
 	switch os.Getenv(StorageModeEnv) {
 	case StorageModeTransition:
@@ -493,6 +494,7 @@ func (cfg *Config) loadStoredACMECertificateMetadataBundle(ctx context.Context, 
 //
 // This will always try to ARI without checking if it needs to be refreshed. Call
 // NeedsRefresh() on the RenewalInfo first, and only call this if that returns true.
+// It switches storage modes between legacy and bundle mode based on the CERTMAGIC_STORAGE_MODE env.
 func (cfg *Config) updateARI(ctx context.Context, cert Certificate, logger *zap.Logger) (updatedCert Certificate, changed bool, err error) {
 	switch os.Getenv(StorageModeEnv) {
 	case StorageModeTransition:

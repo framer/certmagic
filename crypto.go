@@ -271,6 +271,8 @@ func (cfg *Config) loadCertResourceAnyIssuer(ctx context.Context, certNamesKey s
 	return certResources[0].CertificateResource, nil
 }
 
+// loadCertResource loads a certificate resource from the given issuer's storage location.
+// It switches storage modes between legacy and bundle mode based on the CERTMAGIC_STORAGE_MODE env.
 func (cfg *Config) loadCertResource(ctx context.Context, issuer Issuer, certNamesKey string) (CertificateResource, error) {
 	switch os.Getenv(StorageModeEnv) {
 	case StorageModeTransition:
