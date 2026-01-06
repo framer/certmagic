@@ -51,6 +51,8 @@ var (
 )
 
 func ConfigureStorageMode(mode string, rolloutPercent int) {
+	// Note: We have no lock protecting these variables. This is a potential race condition, yes.
+	// But this function is only called once during init(), before anything else happens.
 	StorageMode = mode
 	StorageModeRolloutPercent = rolloutPercent
 }
