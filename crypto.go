@@ -30,7 +30,6 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io/fs"
-	"os"
 	"sort"
 	"strings"
 
@@ -144,7 +143,7 @@ func fastHash(input []byte) string {
 // saveCertResource saves the certificate resource to disk.
 // It switches storage modes between legacy and bundle mode based on the CERTMAGIC_STORAGE_MODE env.
 func (cfg *Config) saveCertResource(ctx context.Context, issuer Issuer, cert CertificateResource) error {
-	switch os.Getenv(StorageModeEnv) {
+	switch StorageModeForDomain(cert.NamesKey()) {
 	case StorageModeTransition:
 		if err := cfg.saveCertResourceBundle(ctx, issuer, cert); err != nil {
 			cfg.Logger.Warn("unable to store certificate resource bundle",
@@ -274,7 +273,7 @@ func (cfg *Config) loadCertResourceAnyIssuer(ctx context.Context, certNamesKey s
 // loadCertResource loads a certificate resource from the given issuer's storage location.
 // It switches storage modes between legacy and bundle mode based on the CERTMAGIC_STORAGE_MODE env.
 func (cfg *Config) loadCertResource(ctx context.Context, issuer Issuer, certNamesKey string) (CertificateResource, error) {
-	switch os.Getenv(StorageModeEnv) {
+	switch StorageModeForDomain(certNamesKey) {
 	case StorageModeTransition:
 		certRes, err := cfg.loadCertResourceBundle(ctx, issuer, certNamesKey)
 		if err == nil {

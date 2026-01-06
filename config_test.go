@@ -158,7 +158,7 @@ func mustJSON(val any) []byte {
 // testStorageModeSetup creates a test config with the specified storage mode
 func testStorageModeSetup(t *testing.T, mode, storagePath string) (*Config, *ACMEIssuer) {
 	t.Helper()
-	t.Setenv(StorageModeEnv, mode)
+	ConfigureStorageMode(mode, 100)
 
 	am := &ACMEIssuer{CA: "https://example.com/acme/directory"}
 	cfg := &Config{
@@ -291,7 +291,7 @@ func TestStorageModeTransitionFallback(t *testing.T) {
 	cert := makeCertResource(am, domain, true)
 
 	// Save in legacy mode to simulate existing data
-	os.Setenv(StorageModeEnv, StorageModeLegacy)
+	ConfigureStorageMode(StorageModeLegacy, 0)
 	if err := cfg.saveCertResource(ctx, am, cert); err != nil {
 		t.Fatalf("Failed to save cert in legacy mode: %v", err)
 	}
@@ -301,7 +301,7 @@ func TestStorageModeTransitionFallback(t *testing.T) {
 	assertFileNotExists(t, ctx, cfg.Storage, StorageKeys.SiteBundle(issuerKey, domain))
 
 	// Switch to transition mode and verify fallback to legacy works
-	os.Setenv(StorageModeEnv, StorageModeTransition)
+	ConfigureStorageMode(StorageModeTransition, 100)
 	loaded, err := cfg.loadCertResource(ctx, am, domain)
 	if err != nil {
 		t.Fatalf("Failed to load cert in transition mode with fallback: %v", err)

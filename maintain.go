@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 	"path"
 	"runtime"
 	"strings"
@@ -431,7 +430,7 @@ func (cfg *Config) storageHasNewerARI(ctx context.Context, cert Certificate) (bo
 // loadStoredACMECertificateMetadata loads the stored ACME certificate data.
 // It switches storage modes between legacy and bundle mode based on the CERTMAGIC_STORAGE_MODE env.
 func (cfg *Config) loadStoredACMECertificateMetadata(ctx context.Context, cert Certificate) (acme.Certificate, error) {
-	switch os.Getenv(StorageModeEnv) {
+	switch StorageModeForDomain(cert.Names[0]) {
 	case StorageModeTransition:
 		acmecert, err := cfg.loadStoredACMECertificateMetadataBundle(ctx, cert)
 		if err == nil {
@@ -496,7 +495,7 @@ func (cfg *Config) loadStoredACMECertificateMetadataBundle(ctx context.Context, 
 // NeedsRefresh() on the RenewalInfo first, and only call this if that returns true.
 // It switches storage modes between legacy and bundle mode based on the CERTMAGIC_STORAGE_MODE env.
 func (cfg *Config) updateARI(ctx context.Context, cert Certificate, logger *zap.Logger) (updatedCert Certificate, changed bool, err error) {
-	switch os.Getenv(StorageModeEnv) {
+	switch StorageModeForDomain(cert.Names[0]) {
 	case StorageModeTransition:
 		updatedCert, changed, err = cfg.updateARILegacy(ctx, cert, logger)
 		if err == nil {
@@ -1046,7 +1045,7 @@ func deleteOldOCSPStaples(ctx context.Context, storage Storage, logger *zap.Logg
 }
 
 func deleteExpiredCerts(ctx context.Context, storage Storage, logger *zap.Logger, gracePeriod time.Duration) error {
-	switch os.Getenv(StorageModeEnv) {
+	switch StorageMode {
 	case StorageModeTransition:
 		if err := deleteExpiredCertsBundle(ctx, storage, logger, gracePeriod); err != nil {
 			logger.Warn("unable to delete expired certs from bundle",
@@ -1321,7 +1320,7 @@ func (cfg *Config) moveCompromisedPrivateKey(ctx context.Context, cert Certifica
 	// Delete the storage containing the compromised key based on storage mode.
 	// We intentionally ignore delete errors since the file might not exist,
 	// and we avoid calling .Exists() before .Delete() to minimize storage roundtrips.
-	switch os.Getenv(StorageModeEnv) {
+	switch StorageModeForDomain(cert.Names[0]) {
 	case StorageModeTransition:
 		cfg.Storage.Delete(ctx, bundleKey)
 		cfg.Storage.Delete(ctx, privKeyStorageKey)
