@@ -32,7 +32,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 
@@ -1272,7 +1271,12 @@ func (cfg *Config) checkStorage(ctx context.Context) error {
 // resources related to the certificate for domain.
 // It switches storage modes between legacy and bundle mode based on the CERTMAGIC_STORAGE_MODE env.
 func (cfg *Config) storageHasCertResources(ctx context.Context, issuer Issuer, domain string) bool {
-	switch os.Getenv(StorageModeEnv) {
+	storageMode := StorageModeForDomain(domain)
+	cfg.Logger.Debug("checking if storage has cert resources",
+		zap.String("domain", domain),
+		zap.String("storage_mode", storageMode),
+		zap.Int("rollout_bucket", RolloutBucketForDomain(domain)))
+	switch storageMode {
 	case StorageModeTransition:
 		if cfg.storageHasCertResourcesBundle(ctx, issuer, domain) {
 			return true
@@ -1313,7 +1317,12 @@ func (cfg *Config) storageHasCertResourcesBundle(ctx context.Context, issuer Iss
 // issuer with the given issuer key.
 // It switches storage modes between legacy and bundle mode based on the CERTMAGIC_STORAGE_MODE env.
 func (cfg *Config) deleteSiteAssets(ctx context.Context, issuerKey, domain string) error {
-	switch os.Getenv(StorageModeEnv) {
+	storageMode := StorageModeForDomain(domain)
+	cfg.Logger.Debug("deleting site assets",
+		zap.String("domain", domain),
+		zap.String("storage_mode", storageMode),
+		zap.Int("rollout_bucket", RolloutBucketForDomain(domain)))
+	switch storageMode {
 	case StorageModeTransition:
 		if err := cfg.deleteSiteAssetsBundle(ctx, issuerKey, domain); err != nil {
 			cfg.Logger.Warn("unable to delete certificate resource bundle",

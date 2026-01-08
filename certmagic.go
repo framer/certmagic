@@ -499,27 +499,3 @@ var (
 
 // Maximum size for the stack trace when recovering from panics.
 const stackTraceBufferSize = 1024 * 128
-
-const (
-	// Storage mode controls the format in which certificates are stored in `Storage`.
-	//
-	// Formats:
-	// - legacy: Store cert, privkey and meta as three separate storage items (.cert, .key, .json).
-	// - bundle: Store cert, privkey and meta as a single, bundled storage item (.bundle).
-	//
-	// Modes:
-	// - legacy:     Store and load certificates in legacy format.
-	// - transition: Store in legacy and bundle format, load as bundle with fallback to legacy format.
-	// - bundle:     Store and load certificates in bundle format.
-	//
-	// In the transition mode, failures around reads and writes of the bundle are soft.
-	// They should only log errors and try to work with the legacy format as fallback.
-	// Operations on the legacy format are hard-failures, implying that errors should be propagated up.
-	//
-	// The storage mode is controlled via the CERTMAGIC_STORAGE_MODE environment variable
-	StorageModeEnv = "CERTMAGIC_STORAGE_MODE"
-
-	StorageModeLegacy     = "legacy"
-	StorageModeTransition = "transition"
-	StorageModeBundle     = "bundle"
-)

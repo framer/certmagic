@@ -30,7 +30,6 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io/fs"
-	"os"
 	"sort"
 	"strings"
 
@@ -144,12 +143,17 @@ func fastHash(input []byte) string {
 // saveCertResource saves the certificate resource to disk.
 // It switches storage modes between legacy and bundle mode based on the CERTMAGIC_STORAGE_MODE env.
 func (cfg *Config) saveCertResource(ctx context.Context, issuer Issuer, cert CertificateResource) error {
-	switch os.Getenv(StorageModeEnv) {
+	storageMode := StorageModeForDomain(cert.SANs[0])
+	cfg.Logger.Debug("saving certificate resource",
+		zap.String("domain", cert.SANs[0]),
+		zap.String("storage_mode", storageMode),
+		zap.Int("rollout_bucket", RolloutBucketForDomain(cert.SANs[0])))
+	switch storageMode {
 	case StorageModeTransition:
 		if err := cfg.saveCertResourceBundle(ctx, issuer, cert); err != nil {
 			cfg.Logger.Warn("unable to store certificate resource bundle",
 				zap.String("issuer", issuer.IssuerKey()),
-				zap.String("domain", cert.NamesKey()),
+				zap.String("domain", cert.SANs[0]),
 				zap.Error(err))
 		}
 		return cfg.saveCertResourceLegacy(ctx, issuer, cert)
@@ -274,7 +278,12 @@ func (cfg *Config) loadCertResourceAnyIssuer(ctx context.Context, certNamesKey s
 // loadCertResource loads a certificate resource from the given issuer's storage location.
 // It switches storage modes between legacy and bundle mode based on the CERTMAGIC_STORAGE_MODE env.
 func (cfg *Config) loadCertResource(ctx context.Context, issuer Issuer, certNamesKey string) (CertificateResource, error) {
-	switch os.Getenv(StorageModeEnv) {
+	storageMode := StorageModeForDomain(certNamesKey)
+	cfg.Logger.Debug("loading certificate resource",
+		zap.String("domain", certNamesKey),
+		zap.String("storage_mode", storageMode),
+		zap.Int("rollout_bucket", RolloutBucketForDomain(certNamesKey)))
+	switch storageMode {
 	case StorageModeTransition:
 		certRes, err := cfg.loadCertResourceBundle(ctx, issuer, certNamesKey)
 		if err == nil {
