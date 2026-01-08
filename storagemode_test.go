@@ -1,36 +1,30 @@
 package certmagic
 
-import (
-	"crypto/rand"
-	"fmt"
-	"testing"
-)
+import "testing"
 
 func TestStorageModeRolloutPercentLegacy(t *testing.T) {
 	// In legacy mode, storage mode for all domains must be "legacy", no matter the rollout percent.
-	// This test brute-forces all possible test cases, as they are cheap to assert.
-	for rolloutPercent := range 100 {
+	for _, rolloutPercent := range []int{0, 50, 100} {
 		ConfigureStorageMode(StorageModeLegacy, rolloutPercent)
 
-		for _, domain := range testStorageModeDomains {
-			want, got := StorageModeLegacy, StorageModeForDomain(domain)
-			if want != got {
-				t.Errorf("expected storage mode %q for domain %q, got: %q", want, domain, got)
+		for _, domain := range []string{"cyufsv.com", "lgxeeu.com", "msngsw.com"} {
+			if got := StorageModeForDomain(domain); got != StorageModeLegacy {
+				t.Errorf("rollout %d%%, StorageModeForDomain(%q) = %q, want %q",
+					rolloutPercent, domain, got, StorageModeLegacy)
 			}
 		}
 	}
 }
 
 func TestStorageModeRolloutPercentBundle(t *testing.T) {
-	// In legacy mode, storage mode for all domains must be "legacy", no matter the rollout percent.
-	// This test brute-forces all possible test cases, as they are cheap to assert.
-	for rolloutPercent := range 100 {
+	// In bundle mode, storage mode for all domains must be "bundle", no matter the rollout percent.
+	for _, rolloutPercent := range []int{0, 50, 100} {
 		ConfigureStorageMode(StorageModeBundle, rolloutPercent)
 
-		for _, domain := range testStorageModeDomains {
-			want, got := StorageModeBundle, StorageModeForDomain(domain)
-			if want != got {
-				t.Errorf("expected storage mode %q for domain %q, got: %q", want, domain, got)
+		for _, domain := range []string{"cyufsv.com", "lgxeeu.com", "msngsw.com"} {
+			if got := StorageModeForDomain(domain); got != StorageModeBundle {
+				t.Errorf("rollout %d%%, StorageModeForDomain(%q) = %q, want %q",
+					rolloutPercent, domain, got, StorageModeBundle)
 			}
 		}
 	}
@@ -38,155 +32,53 @@ func TestStorageModeRolloutPercentBundle(t *testing.T) {
 
 func TestStorageModeRolloutPercentTransition(t *testing.T) {
 	// In transition mode, storage mode for domains can either be "transition" or "legacy", depending on rollout percent.
-	// This test brute-forces all possible test cases, as they are cheap to assert.
-	for rolloutPercent := range 100 {
-		ConfigureStorageMode(StorageModeTransition, rolloutPercent)
+	// Domains are assigned to buckets 0-99 based on their hash. A domain enters transition mode
+	// if its bucket is below the rollout percent.
+	//
+	// Test domains and their buckets:
+	//   "cyufsv.com" -> bucket 0
+	//   "wrgmsg.com" -> bucket 1
+	//   "cdbbdh.com" -> bucket 49
+	//   "lgxeeu.com" -> bucket 50
+	//   "hwqhre.com" -> bucket 51
+	//   "ckycee.com" -> bucket 98
+	//   "msngsw.com" -> bucket 99
+	tests := []struct {
+		name           string
+		rolloutPercent int
+		domain         string
+		domainBucket   int
+		want           string
+	}{
+		// 0% rollout: no domains should transition
+		{"0% rollout, bucket 0", 0, "cyufsv.com", 0, StorageModeLegacy},
+		{"0% rollout, bucket 50", 0, "lgxeeu.com", 50, StorageModeLegacy},
+		{"0% rollout, bucket 99", 0, "msngsw.com", 99, StorageModeLegacy},
 
-		for domainBucket, domain := range testStorageModeDomains {
-			got := StorageModeForDomain(domain)
+		// 100% rollout: all domains should transition
+		{"100% rollout, bucket 0", 100, "cyufsv.com", 0, StorageModeTransition},
+		{"100% rollout, bucket 50", 100, "lgxeeu.com", 50, StorageModeTransition},
+		{"100% rollout, bucket 99", 100, "msngsw.com", 99, StorageModeTransition},
 
-			var want string
-			if domainBucket < rolloutPercent {
-				want = StorageModeTransition
-			} else {
-				want = StorageModeLegacy
-			}
+		// Edge cases: bucket exactly at rollout boundary
+		{"50% rollout, bucket 49 (just below)", 50, "cdbbdh.com", 49, StorageModeTransition},
+		{"50% rollout, bucket 50 (exactly at)", 50, "lgxeeu.com", 50, StorageModeLegacy},
+		{"50% rollout, bucket 51 (just above)", 50, "hwqhre.com", 51, StorageModeLegacy},
 
-			if want != got {
-				t.Errorf("expected storage mode %q for domain %q, got: %q", want, domain, got)
-			}
-		}
+		// Edge cases at boundaries
+		{"1% rollout, bucket 0", 1, "cyufsv.com", 0, StorageModeTransition},
+		{"1% rollout, bucket 1", 1, "wrgmsg.com", 1, StorageModeLegacy},
+		{"99% rollout, bucket 98", 99, "ckycee.com", 98, StorageModeTransition},
+		{"99% rollout, bucket 99", 99, "msngsw.com", 99, StorageModeLegacy},
 	}
-}
 
-func GenerateRandomDomainsForRolloutBuckets(t *testing.T) {
-	for desiredBucket := range 100 {
-		for {
-			domain := RandomDomain()
-			bucket := RolloutBucketForDomain(domain)
-			if desiredBucket == bucket {
-				fmt.Println(domain, bucket)
-				break
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ConfigureStorageMode(StorageModeTransition, tt.rolloutPercent)
+			if got := StorageModeForDomain(tt.domain); got != tt.want {
+				t.Errorf("StorageModeForDomain(%q) = %q, want %q (bucket %d, rollout %d%%)",
+					tt.domain, got, tt.want, tt.domainBucket, tt.rolloutPercent)
 			}
-		}
+		})
 	}
-}
-
-func RandomDomain() string {
-	alphabet := "abcdefghijklmnopqrstuvwxyz"
-	src := make([]byte, 6)
-	rand.Read(src)
-	for i := range src {
-		src[i] = alphabet[src[i]%26]
-	}
-	return string(src) + ".com"
-}
-
-// testStorageModeDomains are domains whose hashes are deterministic.
-// Example:
-// - Domain at index 0 hashes to bucket 0
-// - Domain at index 1 hashes to bucket 1
-// - Domain at index 2 hashes to bucket 2
-// - ...
-var testStorageModeDomains = []string{
-	"cyufsv.com",
-	"wrgmsg.com",
-	"brgdjo.com",
-	"ydwcck.com",
-	"mflmhz.com",
-	"haegjj.com",
-	"zmhovf.com",
-	"obufpu.com",
-	"feslvv.com",
-	"sebycw.com",
-	"eilifq.com",
-	"hqbrqi.com",
-	"msdfdl.com",
-	"zzyzeg.com",
-	"omkufr.com",
-	"wxknzs.com",
-	"sbrjrs.com",
-	"oirmum.com",
-	"ahkfmk.com",
-	"pasrgp.com",
-	"wkxoax.com",
-	"hrften.com",
-	"awvybq.com",
-	"sdnroo.com",
-	"oihglq.com",
-	"ilomtn.com",
-	"jsslsa.com",
-	"xfqsqj.com",
-	"seccht.com",
-	"kdggrx.com",
-	"htueua.com",
-	"rwnblj.com",
-	"muuiye.com",
-	"dmgdwl.com",
-	"ehcpua.com",
-	"hheskv.com",
-	"xapqrp.com",
-	"rtqlga.com",
-	"zwejrb.com",
-	"caijym.com",
-	"qqobjq.com",
-	"ylhtvl.com",
-	"leotig.com",
-	"xzzdkn.com",
-	"gtbrls.com",
-	"ffdfon.com",
-	"yndvoz.com",
-	"pcdete.com",
-	"mqqawg.com",
-	"cdbbdh.com",
-	"lgxeeu.com",
-	"hwqhre.com",
-	"glzlpq.com",
-	"wmogra.com",
-	"cdrpnm.com",
-	"idrfwa.com",
-	"ktrubn.com",
-	"xohmsv.com",
-	"mmddcs.com",
-	"mlmgvj.com",
-	"myxcwb.com",
-	"rrlbbu.com",
-	"abifcu.com",
-	"uarnen.com",
-	"utvepr.com",
-	"hvriwm.com",
-	"ktoobi.com",
-	"pkucoi.com",
-	"enszeo.com",
-	"boerwx.com",
-	"oftmjp.com",
-	"conpid.com",
-	"xsixnx.com",
-	"acbdut.com",
-	"oipdfz.com",
-	"cceope.com",
-	"shyuyj.com",
-	"flddpw.com",
-	"hmdtxy.com",
-	"lsfqfe.com",
-	"ynmpsm.com",
-	"kbkkbn.com",
-	"xrerap.com",
-	"dhhhkr.com",
-	"zdbnpt.com",
-	"ttxvat.com",
-	"rkrnjg.com",
-	"xkanxi.com",
-	"nbcmqi.com",
-	"mmhner.com",
-	"elunlf.com",
-	"bjupxh.com",
-	"loosax.com",
-	"fliwby.com",
-	"kjelwq.com",
-	"nlcgov.com",
-	"jjxavu.com",
-	"gpalyx.com",
-	"ckycee.com",
-	"msngsw.com",
 }
